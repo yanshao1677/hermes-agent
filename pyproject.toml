@@ -5,13 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermes-agent"
 version = "0.8.0"
-description = "The self-improving AI agent — creates skills from experience, improves them during use, and runs anywhere"
+description = "自我改进的 AI 代理——从经验中创建技能，在使用过程中改进，随处运行"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Nous Research" }]
 license = { text = "MIT" }
 dependencies = [
-  # Core — pinned to known-good ranges to limit supply chain attack surface
+  # 核心——固定到已知良好范围以限制供应链攻击面
   "openai>=2.21.0,<3",
   "anthropic>=0.39.0,<1",
   "python-dotenv>=1.2.1,<2",
@@ -23,16 +23,16 @@ dependencies = [
   "requests>=2.33.0,<3",  # CVE-2026-25645
   "jinja2>=3.1.5,<4",
   "pydantic>=2.12.5,<3",
-  # Interactive CLI (prompt_toolkit is used directly by cli.py)
+  # 交互式 CLI（prompt_toolkit 由 cli.py 直接使用）
   "prompt_toolkit>=3.0.52,<4",
-  # Tools
+  # 工具
   "exa-py>=2.9.0,<3",
   "firecrawl-py>=4.16.0,<5",
   "parallel-web>=0.4.2,<1",
   "fal-client>=0.13.1,<1",
-  # Text-to-speech (Edge TTS is free, no API key needed)
+  # 文本转语音（Edge TTS 免费，无需 API 密钥）
   "edge-tts>=7.2.7,<8",
-  # Skills Hub (GitHub App JWT auth — optional, only needed for bot identity)
+  # 技能中心（GitHub App JWT 认证——可选，仅用于 bot 身份）
   "PyJWT[crypto]>=2.12.0,<3",  # CVE-2026-32597
 ]
 
@@ -47,8 +47,8 @@ matrix = ["mautrix[encryption]>=0.20,<1", "Markdown>=3.6,<4", "aiosqlite>=0.20",
 cli = ["simple-term-menu>=1.0,<2"]
 tts-premium = ["elevenlabs>=1.0,<2"]
 voice = [
-  # Local STT pulls in wheel-only transitive deps (ctranslate2, onnxruntime),
-  # so keep it out of the base install for source-build packagers like Homebrew.
+  # 本地 STT 会拉取仅 wheel 的传递依赖（ctranslate2、onnxruntime），
+  # 所以将其排除在基础安装之外，以便 Homebrew 等源码构建打包工具使用。
   "faster-whisper>=1.0.0,<2",
   "sounddevice>=0.4.6,<1",
   "numpy>=1.24.0,<3",
@@ -64,9 +64,9 @@ sms = ["aiohttp>=3.9.0,<4"]
 acp = ["agent-client-protocol>=0.9.0,<1.0"]
 mistral = ["mistralai>=2.3.0,<3"]
 termux = [
-  # Tested Android / Termux path: keeps the core CLI feature-rich while
-  # avoiding extras that currently depend on non-Android wheels (notably
-  # faster-whisper -> ctranslate2 via the voice extra).
+  # 已测试的 Android / Termux 路径：保持核心 CLI 功能丰富，
+  # 同时避免当前依赖非 Android wheel 的额外组件
+  # （特别是 faster-whisper -> ctranslate2，通过 voice extra）。
   "hermes-agent[cron]",
   "hermes-agent[cli]",
   "hermes-agent[pty]",
@@ -89,9 +89,9 @@ all = [
   "hermes-agent[modal]",
   "hermes-agent[daytona]",
   "hermes-agent[messaging]",
-  # matrix: python-olm (required by matrix-nio[e2e]) is upstream-broken on
-  # modern macOS (archived libolm, C++ errors with Clang 21+).  On Linux the
-  # [matrix] extra's own marker pulls in the [e2e] variant automatically.
+  # matrix：python-olm（matrix-nio[e2e] 需要）在现代 macOS 上上游已损坏
+  #（libolm 已归档，Clang 21+ 下有 C++ 错误）。
+  # 在 Linux 上，[matrix] extra 的 own marker 会自动拉取 [e2e] 变体。
   "hermes-agent[matrix]; sys_platform == 'linux'",
   "hermes-agent[cron]",
   "hermes-agent[cli]",
@@ -128,6 +128,6 @@ include = ["agent", "tools", "tools.*", "hermes_cli", "gateway", "gateway.*", "c
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "integration: marks tests requiring external services (API keys, Modal, etc.)",
+    "integration: 标记需要外部服务的测试（API 密钥、Modal 等）",
 ]
 addopts = "-m 'not integration' -n auto"
