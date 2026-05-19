@@ -5639,6 +5639,7 @@ class AIAgent:
 
     @staticmethod
     def _materialize_data_url_for_vision(image_url: str) -> tuple[str, Optional[Path]]:
+        # 将 data url 处理为图片文件，并返回路径
         header, _, data = str(image_url or "").partition(",")
         mime = "image/jpeg"
         if header.startswith("data:"):
@@ -5659,6 +5660,7 @@ class AIAgent:
         return str(path), path
 
     def _describe_image_for_anthropic_fallback(self, image_url: str, role: str) -> str:
+        # Anthropic 不支持图片输入时，为图片生成文本描述用于回退
         cache_key = hashlib.sha256(str(image_url or "").encode("utf-8")).hexdigest()
         cached = self._anthropic_image_fallback_cache.get(cache_key)
         if cached:
@@ -5669,9 +5671,7 @@ class AIAgent:
             "tool": "tool result",
         }.get(role, "user")
         analysis_prompt = (
-            "Describe everything visible in this image in thorough detail. "
-            "Include any text, code, UI, data, objects, people, layout, colors, "
-            "and any other notable visual information."
+            "用详尽的细节描述这张图片里可见的所有内容。包括所有文字、代码、界面、数据、物体、人、布局、色彩及任何其他显著的视觉信息。"
         )
 
         vision_source = str(image_url or "")
@@ -5689,7 +5689,7 @@ class AIAgent:
             result = json.loads(result_json) if isinstance(result_json, str) else {}
             description = (result.get("analysis") or "").strip()
         except Exception as e:
-            description = f"Image analysis failed: {e}"
+            description = f"图片分析失败: {e}"
         finally:
             if cleanup_path and cleanup_path.exists():
                 try:
@@ -5698,18 +5698,19 @@ class AIAgent:
                     pass
 
         if not description:
-            description = "Image analysis failed."
+            description = "图片分析失败。"
 
-        note = f"[The {role_label} attached an image. Here's what it contains:\n{description}]"
+        note = f"[{role_label} 附加了一张图片。图片内容如下：\n{description}]"
         if vision_source and not str(image_url or "").startswith("data:"):
             note += (
-                f"\n[If you need a closer look, use vision_analyze with image_url: {vision_source}]"
+                f"\n[如需更详细分析，可使用 vision_analyze，图片链接为: {vision_source}]"
             )
 
         self._anthropic_image_fallback_cache[cache_key] = note
         return note
 
     def _preprocess_anthropic_content(self, content: Any, role: str) -> Any:
+        # 将 multimodal 内容转换为适用于 Anthropic 的文本格式
         if not self._content_has_image_parts(content):
             return content
 
@@ -5736,7 +5737,7 @@ class AIAgent:
                 if image_url:
                     image_notes.append(self._describe_image_for_anthropic_fallback(image_url, role))
                 else:
-                    image_notes.append("[An image was attached but no image source was available.]")
+                    image_notes.append("[已附加图片，但未提供图片来源。]")
                 continue
 
             text = str(part.get("text", "") or "").strip()
@@ -5751,9 +5752,10 @@ class AIAgent:
             return prefix
         if suffix:
             return suffix
-        return "[A multimodal message was converted to text for Anthropic compatibility.]"
+        return "[多模态消息已被转换为文本，以兼容 Anthropic。]"
 
     def _prepare_anthropic_messages_for_api(self, api_messages: list) -> list:
+        # 检查消息内容是否包含图片，必要时进行转换
         if not any(
             isinstance(msg, dict) and self._content_has_image_parts(msg.get("content"))
             for msg in api_messages
@@ -5771,21 +5773,22 @@ class AIAgent:
         return transformed
 
     def _anthropic_preserve_dots(self) -> bool:
-        """True when using an anthropic-compatible endpoint that preserves dots in model names.
-        Alibaba/DashScope keeps dots (e.g. qwen3.5-plus).
-        MiniMax keeps dots (e.g. MiniMax-M2.7).
-        OpenCode Go/Zen keeps dots for non-Claude models (e.g. minimax-m2.5-free).
-        ZAI/Zhipu keeps dots (e.g. glm-4.7, glm-5.1)."""
+        """当使用保留模型名称中点号的 Anthropic 兼容端点时返回 True。
+        阿里巴巴/DashScope（如 qwen3.5-plus）保留点；
+        MiniMax（如 MiniMax-M2.7）保留点；
+        OpenCode Go/Zen，非 Claude 模型（如 minimax-m2.5-free）保留点；
+        ZAI/智谱（如 glm-4.7, glm-5.1）保留点。"""
         if (getattr(self, "provider", "") or "").lower() in {"alibaba", "minimax", "minimax-cn", "opencode-go", "opencode-zen", "zai"}:
             return True
         base = (getattr(self, "base_url", "") or "").lower()
         return "dashscope" in base or "aliyuncs" in base or "minimax" in base or "opencode.ai/zen/" in base or "bigmodel.cn" in base
 
     def _is_qwen_portal(self) -> bool:
-        """当基础 URL 指向 Qwen Portal 时返回 True。"""
+        """基础 URL 指向 Qwen Portal 时返回 True。"""
         return "portal.qwen.ai" in self._base_url_lower
 
     def _qwen_prepare_chat_messages(self, api_messages: list) -> list:
+        # 为 Qwen API 适配消息格式
         prepared = copy.deepcopy(api_messages)
         if not prepared:
             return prepared
@@ -5797,8 +5800,7 @@ class AIAgent:
             if isinstance(content, str):
                 msg["content"] = [{"type": "text", "text": content}]
             elif isinstance(content, list):
-                # 规范化：将裸字符串转换为文本字典，保留字典原样。
-                # deepcopy 已经创建了独立副本，无需使用 dict()。
+                # 规范化：将字符串变为文本字典，保留字典原样。
                 normalized_parts = []
                 for part in content:
                     if isinstance(part, str):
@@ -5808,7 +5810,7 @@ class AIAgent:
                 if normalized_parts:
                     msg["content"] = normalized_parts
 
-        # 在系统消息的最后部分注入 cache_control。
+        # 在第一条 system 消息的最后一个部分，注入 cache_control
         for msg in prepared:
             if isinstance(msg, dict) and msg.get("role") == "system":
                 content = msg.get("content")
@@ -5819,7 +5821,7 @@ class AIAgent:
         return prepared
 
     def _qwen_prepare_chat_messages_inplace(self, messages: list) -> None:
-        """就地变体 — 修改已复制的消息列表。"""
+        """原地处理（修改传入的已复制消息列表）。"""
         if not messages:
             return
 
@@ -5917,9 +5919,10 @@ class AIAgent:
 
             if reasoning_enabled:
                 if is_github_responses:
-                    # Copilot's Responses route advertises reasoning-effort support,
-                    # but not OpenAI-specific prompt cache or encrypted reasoning
-                    # fields. Keep the payload to the documented subset.
+                    # Copilot 的 Responses 路由支持 reasoning-effort（推理强度），
+                    # 但不支持 OpenAI 特有的 prompt 缓存或加密推理字段。
+                    # 只保留文档中规定的字段到请求体中。
+         
                     github_reasoning = self._github_models_reasoning_extra_body()
                     if github_reasoning is not None:
                         kwargs["reasoning"] = github_reasoning
@@ -5958,12 +5961,13 @@ class AIAgent:
                     break
 
         if needs_sanitization:
+            # 如果需要清理，深拷贝一份 api_messages，避免直接修改原始数据。
             sanitized_messages = copy.deepcopy(api_messages)
             for msg in sanitized_messages:
                 if not isinstance(msg, dict):
                     continue
 
-                # Codex-only replay state must not leak into strict chat-completions APIs.
+                # 只有 Codex 重放相关的状态，不能泄漏到严格的 chat-completions API。
                 msg.pop("codex_reasoning_items", None)
 
                 tool_calls = msg.get("tool_calls")
@@ -5973,20 +5977,21 @@ class AIAgent:
                             tool_call.pop("call_id", None)
                             tool_call.pop("response_item_id", None)
 
-        # Qwen portal: normalize content to list-of-dicts, inject cache_control.
-        # Must run AFTER codex sanitization so we transform the final messages.
-        # If sanitization already deepcopied, reuse that copy (in-place).
+        # Qwen 门户：将 content 标准化为字典的列表，注入 cache_control 字段。
+        # 必须在 Codex 清理之后执行，这样才能处理最终的消息内容。
+        # 如果清理过程已经做了深拷贝，这里就直接在副本上原地修改。
         if self._is_qwen_portal():
             if sanitized_messages is api_messages:
-                # No sanitization was done — we need our own copy.
+                # 没有经过清理，需要自己制作一份副本。
                 sanitized_messages = self._qwen_prepare_chat_messages(sanitized_messages)
             else:
-                # Already a deepcopy — transform in place to avoid a second deepcopy.
+                # 已经做过深拷贝，直接就地处理，避免再次深拷贝。
                 self._qwen_prepare_chat_messages_inplace(sanitized_messages)
 
-        # GPT-5 and Codex models respond better to 'developer' than 'system'
-        # for instruction-following.  Swap the role at the API boundary so
-        # internal message representation stays uniform ("system").
+        # GPT-5 和 Codex 系列模型在执行指令时，
+        # "developer" 作为身份比 "system" 效果更好。
+        # 因此在 API 调用边界处将角色从 "system" 替换为 "developer"，
+        # 这样内部消息表示依然统一（"system"）。
         _model_lower = (self.model or "").lower()
         if (
             sanitized_messages
@@ -8604,6 +8609,7 @@ class AIAgent:
                     # ── 推理块签名失效自动恢复 ─────────────────
                     # Anthropic 会把 <think> 块做全回合签名，若 context 被压缩/合并/截断 -- 签名必然失效 HTTP400
                     # 恢复方式：剥离所有消息的 reasoning_details 字段（不带任何推理块），只重试一次
+                    # ── 推理块签名失效自动恢复 ─────────────────
                     if (
                         classified.reason == FailoverReason.thinking_signature
                         and not thinking_sig_retry_attempted
@@ -8613,13 +8619,11 @@ class AIAgent:
                             if isinstance(_m, dict):
                                 _m.pop("reasoning_details", None)
                         self._vprint(
-                            f"{self.log_prefix}⚠️  Thinking block signature invalid — "
-                            f"stripped all thinking blocks, retrying...",
+                            f"{self.log_prefix}⚠️  推理块签名无效——已去除所有推理块，正在重试……",
                             force=True,
                         )
                         logging.warning(
-                            "%sThinking block signature recovery: stripped "
-                            "reasoning_details from %d messages",
+                            "%s推理块签名恢复：已从 %d 条消息中去除 reasoning_details",
                             self.log_prefix, len(messages),
                         )
                         continue
@@ -8631,7 +8635,7 @@ class AIAgent:
                     error_msg = str(api_error).lower()
                     _error_summary = self._summarize_api_error(api_error)
                     logger.warning(
-                        "API call failed (attempt %s/%s) error_type=%s %s summary=%s",
+                        "API 请求失败（第 %s/%s 次尝试） error_type=%s %s summary=%s",
                         retry_count,
                         max_retries,
                         error_type,
@@ -8643,68 +8647,61 @@ class AIAgent:
                     _base = getattr(self, "base_url", "unknown")
                     _model = getattr(self, "model", "unknown")
                     _status_code_str = f" [HTTP {status_code}]" if status_code else ""
-                    self._vprint(f"{self.log_prefix}⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}{_status_code_str}", force=True)
-                    self._vprint(f"{self.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
-                    self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
-                    self._vprint(f"{self.log_prefix}   📝 Error: {_error_summary}", force=True)
+                    self._vprint(f"{self.log_prefix}⚠️  API 调用失败（第 {retry_count}/{max_retries} 次）：{error_type}{_status_code_str}", force=True)
+                    self._vprint(f"{self.log_prefix}   🔌 提供商: {_provider}  模型: {_model}", force=True)
+                    self._vprint(f"{self.log_prefix}   🌐 终端: {_base}", force=True)
+                    self._vprint(f"{self.log_prefix}   📝 错误: {_error_summary}", force=True)
                     if status_code and status_code < 500:
                         _err_body = getattr(api_error, "body", None)
                         _err_body_str = str(_err_body)[:300] if _err_body else None
                         if _err_body_str:
-                            self._vprint(f"{self.log_prefix}   📋 Details: {_err_body_str}", force=True)
-                    self._vprint(f"{self.log_prefix}   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens")
+                            self._vprint(f"{self.log_prefix}   📋 详情: {_err_body_str}", force=True)
+                    self._vprint(f"{self.log_prefix}   ⏱️  用时: {elapsed_time:.2f}s  对话上下文: {len(api_messages)} 条, ~{approx_tokens:,} tokens")
 
-                    # Actionable hint for OpenRouter "no tool endpoints" error.
-                    # This fires regardless of whether fallback succeeds — the
-                    # user needs to know WHY their model failed so they can fix
-                    # their provider routing, not just silently fall back.
+                    # OpenRouter“无工具端点”错误的可操作提示。
+                    # 无论是否成功fallback都会触发——用户需要知道自己的模型为什么失败了，以便修正配置，而不是静默fallback。
                     if (
                         self._is_openrouter_url()
                         and "support tool use" in error_msg
                     ):
                         self._vprint(
-                            f"{self.log_prefix}   💡 No OpenRouter providers for {_model} support tool calling with your current settings.",
+                            f"{self.log_prefix}   💡 当前设置下没有支持工具调用的 OpenRouter 提供商可用于 {_model}。",
                             force=True,
                         )
                         if self.providers_allowed:
                             self._vprint(
-                                f"{self.log_prefix}      Your provider_routing.only restriction is filtering out tool-capable providers.",
+                                f"{self.log_prefix}      你的 provider_routing.only 限制过滤掉了支持工具的提供商。",
                                 force=True,
                             )
                             self._vprint(
-                                f"{self.log_prefix}      Try removing the restriction or adding providers that support tools for this model.",
+                                f"{self.log_prefix}      请移除该限制或添加支持该模型工具调用的提供商。",
                                 force=True,
                             )
                         self._vprint(
-                            f"{self.log_prefix}      Check which providers support tools: https://openrouter.ai/models/{_model}",
+                            f"{self.log_prefix}      查看哪些提供商支持工具调用: https://openrouter.ai/models/{_model}",
                             force=True,
                         )
 
-                    # Check for interrupt before deciding to retry
+                    # 在决定重试前检查中断
                     if self._interrupt_requested:
-                        self._vprint(f"{self.log_prefix}⚡ Interrupt detected during error handling, aborting retries.", force=True)
+                        self._vprint(f"{self.log_prefix}⚡ 错误处理期间检测到中断，终止重试。", force=True)
                         self._persist_session(messages, conversation_history)
                         self.clear_interrupt()
                         return {
-                            "final_response": f"Operation interrupted: handling API error ({error_type}: {self._clean_error_message(str(api_error))}).",
+                            "final_response": f"操作被中断：处理中 API 错误时（{error_type}: {self._clean_error_message(str(api_error))}）。",
                             "messages": messages,
                             "api_calls": api_call_count,
                             "completed": False,
                             "interrupted": True,
                         }
                     
-                    # Check for 413 payload-too-large BEFORE generic 4xx handler.
-                    # A 413 is a payload-size error — the correct response is to
-                    # compress history and retry, not abort immediately.
+                    # 在通用 4xx 处理前，先检查 413（Payload Too Large）。
+                    # 413 表示内容过大，正确做法是压缩历史并重试，而不是直接中断。
                     status_code = getattr(api_error, "status_code", None)
 
-                    # ── Anthropic Sonnet long-context tier gate ───────────
-                    # Anthropic returns HTTP 429 "Extra usage is required for
-                    # long context requests" when a Claude Max (or similar)
-                    # subscription doesn't include the 1M-context tier.  This
-                    # is NOT a transient rate limit — retrying or switching
-                    # credentials won't help.  Reduce context to 200k (the
-                    # standard tier) and compress.
+                    # ── Anthropic Sonnet 长上下文订阅等级限制 ───────────
+                    # Anthropic 当 Claude Max（或类似套餐）未开通 1M context 时，长上下文请求返回 HTTP 429“需要额外费用”。
+                    # 这不是短暂的限流，重试或切换授权无效。应将 context 降为 20W 并压缩。
                     if classified.reason == FailoverReason.long_context_tier:
                         _reduced_ctx = 200000
                         compressor = self.context_compressor
@@ -8717,19 +8714,13 @@ class AIAgent:
                                 api_key=getattr(self, "api_key", ""),
                                 provider=self.provider,
                             )
-                            # Context probing flags — only set on built-in
-                            # compressor (plugin engines manage their own).
+                            # context 探测标记，只对内置 compressor 生效（插件引擎自管理）
                             if hasattr(compressor, "_context_probed"):
                                 compressor._context_probed = True
-                                # Don't persist — this is a subscription-tier
-                                # limitation, not a model capability.  If the
-                                # user later enables extra usage the 1M limit
-                                # should come back automatically.
+                                # 不持久化——此为套餐限制非模型能力。如果用户后续升级套餐，1M 限额应自动恢复。
                                 compressor._context_probe_persistable = False
                             self._vprint(
-                                f"{self.log_prefix}⚠️  Anthropic long-context tier "
-                                f"requires extra usage — reducing context: "
-                                f"{old_ctx:,} → {_reduced_ctx:,} tokens",
+                                f"{self.log_prefix}⚠️  Anthropic 长上下文订阅受限，需要额外配额——context 由 {old_ctx:,} → {_reduced_ctx:,} tokens",
                                 force=True,
                             )
 
@@ -8741,20 +8732,16 @@ class AIAgent:
                                 approx_tokens=approx_tokens,
                                 task_id=effective_task_id,
                             )
-                            # Compression created a new session — clear history
-                            # so _flush_messages_to_session_db writes compressed
-                            # messages to the new session, not skipping them.
+                            # 压缩会生成新 session——清空历史，以便 _flush_messages_to_session_db 正确写入。
                             conversation_history = None
                             if len(messages) < original_len or old_ctx > _reduced_ctx:
                                 self._emit_status(
-                                    f"🗜️ Context reduced to {_reduced_ctx:,} tokens "
-                                    f"(was {old_ctx:,}), retrying..."
+                                    f"🗜️ context 缩减至 {_reduced_ctx:,} tokens（原 {old_ctx:,}），重试中……"
                                 )
                                 time.sleep(2)
                                 restart_with_compressed_messages = True
                                 break
-                        # Fall through to normal error handling if compression
-                        # is exhausted or didn't help.
+                        # 如果压缩用尽或无效，则进入常规错误处理
 
                     # Eager fallback for rate-limit errors (429 or quota exhaustion).
                     # When a fallback model is configured, switch immediately instead
@@ -8772,7 +8759,7 @@ class AIAgent:
                         pool = self._credential_pool
                         pool_may_recover = pool is not None and pool.has_available()
                         if not pool_may_recover:
-                            self._emit_status("⚠️ Rate limited — switching to fallback provider...")
+                            self._emit_status("⚠️ 触发限流，切换到备用提供商…")
                             if self._try_activate_fallback():
                                 retry_count = 0
                                 compression_attempts = 0
@@ -8786,18 +8773,18 @@ class AIAgent:
                     if is_payload_too_large:
                         compression_attempts += 1
                         if compression_attempts > max_compression_attempts:
-                            self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached for payload-too-large error.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
-                            logging.error(f"{self.log_prefix}413 compression failed after {max_compression_attempts} attempts.")
+                            self._vprint(f"{self.log_prefix}❌ 超过最大压缩次数（{max_compression_attempts}），依然 payload-too-large。", force=True)
+                            self._vprint(f"{self.log_prefix}   💡 可用 /new 开启新对话，或 /compress 重试压缩。", force=True)
+                            logging.error(f"{self.log_prefix}413 payload 编码压缩失败，已达 {max_compression_attempts} 次。")
                             self._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
-                                "error": f"Request payload too large: max compression attempts ({max_compression_attempts}) reached.",
+                                "error": f"请求内容过大。最大压缩次数（{max_compression_attempts}）已达。",
                                 "partial": True
                             }
-                        self._emit_status(f"⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
+                        self._emit_status(f"⚠️  请求内容过大（413）—第 {compression_attempts}/{max_compression_attempts} 次压缩尝试…")
 
                         original_len = len(messages)
                         messages, active_system_prompt = self._compress_context(
@@ -8810,27 +8797,25 @@ class AIAgent:
                         conversation_history = None
 
                         if len(messages) < original_len:
-                            self._emit_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
-                            time.sleep(2)  # Brief pause between compression retries
+                            self._emit_status(f"🗜️ 已压缩消息数：{original_len} → {len(messages)}，重试中……")
+                            time.sleep(2)
                             restart_with_compressed_messages = True
                             break
                         else:
-                            self._vprint(f"{self.log_prefix}❌ Payload too large and cannot compress further.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
-                            logging.error(f"{self.log_prefix}413 payload too large. Cannot compress further.")
+                            self._vprint(f"{self.log_prefix}❌ 仍然内容溢出，无法进一步压缩。", force=True)
+                            self._vprint(f"{self.log_prefix}   💡 可用 /new 开启新对话，或 /compress 重试压缩。", force=True)
+                            logging.error(f"{self.log_prefix}413 内容超限，无法进一步压缩。")
                             self._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
-                                "error": "Request payload too large (413). Cannot compress further.",
+                                "error": "请求内容过大（413），无法进一步压缩。",
                                 "partial": True
                             }
 
-                    # Check for context-length errors BEFORE generic 4xx handler.
-                    # The classifier detects context overflow from: explicit error
-                    # messages, generic 400 + large session heuristic (#1630), and
-                    # server disconnect + large session pattern (#2153).
+                    # 优先处理 context-overflow（超长上下文）错误，早于通用 4xx
+                    # 分类器能从显式错误消息、泛 400+大 session、服务器断连+大 session 等情况辨别 context overflow
                     is_context_length_error = (
                         classified.reason == FailoverReason.context_overflow
                     )
@@ -8839,55 +8824,45 @@ class AIAgent:
                         compressor = self.context_compressor
                         old_ctx = compressor.context_length
 
-                        # ── Distinguish two very different errors ───────────
-                        # 1. "Prompt too long": the INPUT exceeds the context window.
-                        #    Fix: reduce context_length + compress history.
-                        # 2. "max_tokens too large": input is fine, but
-                        #    input_tokens + requested max_tokens > context_window.
-                        #    Fix: reduce max_tokens (the OUTPUT cap) for this call.
-                        #    Do NOT shrink context_length — the window is unchanged.
+                        # ── 两类 context 错误区别严格 ───────────
+                        # 1. "Prompt 太长": 输入超出 context window。需减小 context_length+压缩历史。
+                        # 2. "max_tokens 太大": 输入没溢出，上限=输入+输出。需减小 output cap。
+                        #    不要缩小 context_length，本次窗口总长度不变。
                         #
-                        # Note: max_tokens = output token cap (one response).
-                        #       context_length = total window (input + output combined).
+                        # max_tokens = 输出上限
+                        # context_length = 总上下文窗口
                         available_out = parse_available_output_tokens_from_error(error_msg)
                         if available_out is not None:
-                            # Error is purely about the output cap being too large.
-                            # Cap output to the available space and retry without
-                            # touching context_length or triggering compression.
-                            safe_out = max(1, available_out - 64)  # small safety margin
+                            # 错误是输出上限太高——只调整 max_tokens，无需压缩
+                            safe_out = max(1, available_out - 64)  # 安全冗余
                             self._ephemeral_max_output_tokens = safe_out
                             self._vprint(
-                                f"{self.log_prefix}⚠️  Output cap too large for current prompt — "
-                                f"retrying with max_tokens={safe_out:,} "
-                                f"(available_tokens={available_out:,}; context_length unchanged at {old_ctx:,})",
+                                f"{self.log_prefix}⚠️  当前 prompt 输出上限过大—自动尝试 max_tokens={safe_out:,}（可用={available_out:,}，context 长度不变 {old_ctx:,}）",
                                 force=True,
                             )
-                            # Still count against compression_attempts so we don't
-                            # loop forever if the error keeps recurring.
+                            # 这类情况依然计入压缩次数，避免循环
                             compression_attempts += 1
                             if compression_attempts > max_compression_attempts:
-                                self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached.", force=True)
-                                self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
-                                logging.error(f"{self.log_prefix}Context compression failed after {max_compression_attempts} attempts.")
+                                self._vprint(f"{self.log_prefix}❌ 超过最大压缩次数（{max_compression_attempts}）。", force=True)
+                                self._vprint(f"{self.log_prefix}   💡 可用 /new 开启新对话，或 /compress 重试压缩。", force=True)
+                                logging.error(f"{self.log_prefix}context 编码压缩失败，已达 {max_compression_attempts} 次。")
                                 self._persist_session(messages, conversation_history)
                                 return {
                                     "messages": messages,
                                     "completed": False,
                                     "api_calls": api_call_count,
-                                    "error": f"Context length exceeded: max compression attempts ({max_compression_attempts}) reached.",
+                                    "error": f"上下文过长：最大压缩次数（{max_compression_attempts}）已达。",
                                     "partial": True
                                 }
                             restart_with_compressed_messages = True
                             break
 
-                        # Error is about the INPUT being too large — reduce context_length.
-                        # Try to parse the actual limit from the error message
+                        # 错误为输入过大——需缩小 context_length
                         parsed_limit = parse_context_limit_from_error(error_msg)
                         if parsed_limit and parsed_limit < old_ctx:
                             new_ctx = parsed_limit
-                            self._vprint(f"{self.log_prefix}⚠️  Context limit detected from API: {new_ctx:,} tokens (was {old_ctx:,})", force=True)
+                            self._vprint(f"{self.log_prefix}⚠️  API 检测到 context 限额：{new_ctx:,}（原 {old_ctx:,}）", force=True)
                         else:
-                            # Step down to the next probe tier
                             new_ctx = get_next_probe_tier(old_ctx)
 
                         if new_ctx and new_ctx < old_ctx:
@@ -8898,36 +8873,30 @@ class AIAgent:
                                 api_key=getattr(self, "api_key", ""),
                                 provider=self.provider,
                             )
-                            # Context probing flags — only set on built-in
-                            # compressor (plugin engines manage their own).
                             if hasattr(compressor, "_context_probed"):
                                 compressor._context_probed = True
-                                # Only persist limits parsed from the provider's
-                                # error message (a real number).  Guessed fallback
-                                # tiers from get_next_probe_tier() should stay
-                                # in-memory only — persisting them pollutes the
-                                # cache with wrong values.
+                                # 只有真实解析出来的新限额才持久化；降级猜测 tier 不存 cache
                                 compressor._context_probe_persistable = bool(
                                     parsed_limit and parsed_limit == new_ctx
                                 )
-                            self._vprint(f"{self.log_prefix}⚠️  Context length exceeded — stepping down: {old_ctx:,} → {new_ctx:,} tokens", force=True)
+                            self._vprint(f"{self.log_prefix}⚠️  上下文长度超限—step down: {old_ctx:,} → {new_ctx:,} tokens", force=True)
                         else:
-                            self._vprint(f"{self.log_prefix}⚠️  Context length exceeded at minimum tier — attempting compression...", force=True)
+                            self._vprint(f"{self.log_prefix}⚠️  已达 context 最小 tier，尝试压缩历史…", force=True)
 
                         compression_attempts += 1
                         if compression_attempts > max_compression_attempts:
-                            self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
-                            logging.error(f"{self.log_prefix}Context compression failed after {max_compression_attempts} attempts.")
+                            self._vprint(f"{self.log_prefix}❌ 超过最大压缩次数（{max_compression_attempts}）。", force=True)
+                            self._vprint(f"{self.log_prefix}   💡 可用 /new 开启新对话，或 /compress 重试压缩。", force=True)
+                            logging.error(f"{self.log_prefix}context 编码压缩失败，已达 {max_compression_attempts} 次。")
                             self._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
-                                "error": f"Context length exceeded: max compression attempts ({max_compression_attempts}) reached.",
+                                "error": f"上下文过长：最大压缩次数（{max_compression_attempts}）已达。",
                                 "partial": True
                             }
-                        self._emit_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
+                        self._emit_status(f"🗜️ 历史内容过大（约 {approx_tokens:,} tokens）—第 {compression_attempts}/{max_compression_attempts} 次压缩…")
 
                         original_len = len(messages)
                         messages, active_system_prompt = self._compress_context(
@@ -8941,28 +8910,25 @@ class AIAgent:
 
                         if len(messages) < original_len or new_ctx and new_ctx < old_ctx:
                             if len(messages) < original_len:
-                                self._emit_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
-                            time.sleep(2)  # Brief pause between compression retries
+                                self._emit_status(f"🗜️ 已压缩消息数：{original_len} → {len(messages)}，重试中……")
+                            time.sleep(2)
                             restart_with_compressed_messages = True
                             break
                         else:
-                            # Can't compress further and already at minimum tier
-                            self._vprint(f"{self.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 The conversation has accumulated too much content. Try /new to start fresh, or /compress to manually trigger compression.", force=True)
-                            logging.error(f"{self.log_prefix}Context length exceeded: {approx_tokens:,} tokens. Cannot compress further.")
+                            # 不能再压缩且已到最小 tier，报错退出
+                            self._vprint(f"{self.log_prefix}❌ 上下文长度超限且无法进一步压缩。", force=True)
+                            self._vprint(f"{self.log_prefix}   💡 内容已积累过多。可 /new 重新开始或 /compress 强制压缩。", force=True)
+                            logging.error(f"{self.log_prefix}context 超长：{approx_tokens:,} tokens。无法再压缩。")
                             self._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
-                                "error": f"Context length exceeded ({approx_tokens:,} tokens). Cannot compress further.",
+                                "error": f"上下文过长（{approx_tokens:,} tokens）。无法进一步压缩。",
                                 "partial": True
                             }
 
-                    # Check for non-retryable client errors.  The classifier
-                    # already accounts for 413, 429, 529 (transient), context
-                    # overflow, and generic-400 heuristics.  Local validation
-                    # errors (ValueError, TypeError) are programming bugs.
+                    # 检查非可重试客户端错误。分类器已覆盖 413、429、529(transient)、context overflow、通用400等。ValueError、TypeError为本地校验bug。
                     is_local_validation_error = (
                         isinstance(api_error, (ValueError, TypeError))
                         and not isinstance(api_error, UnicodeEncodeError)
@@ -8985,9 +8951,8 @@ class AIAgent:
                     ) and not is_context_length_error
 
                     if is_client_error:
-                        # Try fallback before aborting — a different provider
-                        # may not have the same issue (rate limit, auth, etc.)
-                        self._emit_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
+                        # 优先尝试 fallback
+                        self._emit_status(f"⚠️ 非可重试错误（HTTP {status_code}）—尝试备用…")
                         if self._try_activate_fallback():
                             retry_count = 0
                             compression_attempts = 0
@@ -8998,37 +8963,30 @@ class AIAgent:
                                 api_kwargs, reason="non_retryable_client_error", error=api_error,
                             )
                         self._emit_status(
-                            f"❌ Non-retryable error (HTTP {status_code}): "
-                            f"{self._summarize_api_error(api_error)}"
+                            f"❌ 非可重试错误（HTTP {status_code}）：{self._summarize_api_error(api_error)}"
                         )
-                        self._vprint(f"{self.log_prefix}❌ Non-retryable client error (HTTP {status_code}). Aborting.", force=True)
-                        self._vprint(f"{self.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
-                        self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
-                        # Actionable guidance for common auth errors
+                        self._vprint(f"{self.log_prefix}❌ 非可重试客户端错误（HTTP {status_code}）。终止。", force=True)
+                        self._vprint(f"{self.log_prefix}   🔌 提供商: {_provider}  模型: {_model}", force=True)
+                        self._vprint(f"{self.log_prefix}   🌐 终端: {_base}", force=True)
+                        # 针对常见认证类错误的指引
                         if classified.is_auth or classified.reason == FailoverReason.billing:
                             if _provider == "openai-codex" and status_code == 401:
-                                self._vprint(f"{self.log_prefix}   💡 Codex OAuth token was rejected (HTTP 401). Your token may have been", force=True)
-                                self._vprint(f"{self.log_prefix}      refreshed by another client (Codex CLI, VS Code). To fix:", force=True)
-                                self._vprint(f"{self.log_prefix}      1. Run `codex` in your terminal to generate fresh tokens.", force=True)
-                                self._vprint(f"{self.log_prefix}      2. Then run `hermes auth` to re-authenticate.", force=True)
+                                self._vprint(f"{self.log_prefix}   💡 Codex OAuth token 被拒绝（HTTP 401）。你的 token 可能被其他客户端刷新了（Codex CLI、VS Code）。修复方法：", force=True)
+                                self._vprint(f"{self.log_prefix}      1. 终端运行 codex 生成新 token。", force=True)
+                                self._vprint(f"{self.log_prefix}      2. 运行 hermes auth 重新认证。", force=True)
                             else:
-                                self._vprint(f"{self.log_prefix}   💡 Your API key was rejected by the provider. Check:", force=True)
-                                self._vprint(f"{self.log_prefix}      • Is the key valid? Run: hermes setup", force=True)
-                                self._vprint(f"{self.log_prefix}      • Does your account have access to {_model}?", force=True)
+                                self._vprint(f"{self.log_prefix}   💡 API key 被提供商拒绝，请检查：", force=True)
+                                self._vprint(f"{self.log_prefix}      • KEY 是否有效？hermes setup", force=True)
+                                self._vprint(f"{self.log_prefix}      • 账户是否有权限访问 {_model}？", force=True)
                                 if "openrouter" in str(_base).lower():
-                                    self._vprint(f"{self.log_prefix}      • Check credits: https://openrouter.ai/settings/credits", force=True)
+                                    self._vprint(f"{self.log_prefix}      • 查看余额：https://openrouter.ai/settings/credits", force=True)
                         else:
-                            self._vprint(f"{self.log_prefix}   💡 This type of error won't be fixed by retrying.", force=True)
-                        logging.error(f"{self.log_prefix}Non-retryable client error: {api_error}")
-                        # Skip session persistence when the error is likely
-                        # context-overflow related (status 400 + large session).
-                        # Persisting the failed user message would make the
-                        # session even larger, causing the same failure on the
-                        # next attempt. (#1630)
+                            self._vprint(f"{self.log_prefix}   💡 该类错误重试无效。", force=True)
+                        logging.error(f"{self.log_prefix}非可重试客户端错误：{api_error}")
+                        # 大 session 的 context-overflow 错误（status=400且消息超长）跳过持久化，避免增长循环
                         if status_code == 400 and (approx_tokens > 50000 or len(api_messages) > 80):
                             self._vprint(
-                                f"{self.log_prefix}⚠️  Skipping session persistence "
-                                f"for large failed session to prevent growth loop.",
+                                f"{self.log_prefix}⚠️  大 session 错误跳过持久化，防止死循环增长。",
                                 force=True,
                             )
                         else:
@@ -9043,18 +9001,14 @@ class AIAgent:
                         }
 
                     if retry_count >= max_retries:
-                        # Before falling back, try rebuilding the primary
-                        # client once for transient transport errors (stale
-                        # connection pool, TCP reset).  Only attempted once
-                        # per API call block.
+                        # 用尽重试前，对短暂传输类错误（连接池/断链）重建主 client，仅一次
                         if not primary_recovery_attempted and self._try_recover_primary_transport(
                             api_error, retry_count=retry_count, max_retries=max_retries,
                         ):
                             primary_recovery_attempted = True
                             retry_count = 0
                             continue
-                        # Try fallback before giving up entirely
-                        self._emit_status(f"⚠️ Max retries ({max_retries}) exhausted — trying fallback...")
+                        self._emit_status(f"⚠️ 达最大重试次数（{max_retries}），尝试备用…")
                         if self._try_activate_fallback():
                             retry_count = 0
                             compression_attempts = 0
@@ -9062,16 +9016,12 @@ class AIAgent:
                             continue
                         _final_summary = self._summarize_api_error(api_error)
                         if is_rate_limited:
-                            self._emit_status(f"❌ Rate limited after {max_retries} retries — {_final_summary}")
+                            self._emit_status(f"❌ 多次重试后被限流 — {_final_summary}")
                         else:
-                            self._emit_status(f"❌ API failed after {max_retries} retries — {_final_summary}")
-                        self._vprint(f"{self.log_prefix}   💀 Final error: {_final_summary}", force=True)
+                            self._emit_status(f"❌ 多次重试失败 — {_final_summary}")
+                        self._vprint(f"{self.log_prefix}   💀 最终错误：{_final_summary}", force=True)
 
-                        # Detect SSE stream-drop pattern (e.g. "Network
-                        # connection lost") and surface actionable guidance.
-                        # This typically happens when the model generates a
-                        # very large tool call (write_file with huge content)
-                        # and the proxy/CDN drops the stream mid-response.
+                        # 检测 SSE 流丢失模式，给出操作建议
                         _is_stream_drop = (
                             not getattr(api_error, "status_code", None)
                             and any(p in error_msg for p in (
@@ -9082,22 +9032,16 @@ class AIAgent:
                         )
                         if _is_stream_drop:
                             self._vprint(
-                                f"{self.log_prefix}   💡 The provider's stream "
-                                f"connection keeps dropping. This often happens "
-                                f"when the model tries to write a very large "
-                                f"file in a single tool call.",
+                                f"{self.log_prefix}   💡 服务端 SSE 流连接反复丢失，通常是模型生成了非常大的工具调用（如巨型文件），被代理/CDN 中断。",
                                 force=True,
                             )
                             self._vprint(
-                                f"{self.log_prefix}      Try asking the model "
-                                f"to use execute_code with Python's open() for "
-                                f"large files, or to write the file in smaller "
-                                f"sections.",
+                                f"{self.log_prefix}      可请求模型用 execute_code 和 Python open() 分批写大文件，或改为分段输出。",
                                 force=True,
                             )
 
                         logging.error(
-                            "%sAPI call failed after %s retries. %s | provider=%s model=%s msgs=%s tokens=~%s",
+                            "%sAPI 调用重试 %s 次后失败。%s | provider=%s model=%s msgs=%s tokens=~%s",
                             self.log_prefix, max_retries, _final_summary,
                             _provider, _model, len(api_messages), f"{approx_tokens:,}",
                         )
@@ -9106,15 +9050,11 @@ class AIAgent:
                                 api_kwargs, reason="max_retries_exhausted", error=api_error,
                             )
                         self._persist_session(messages, conversation_history)
-                        _final_response = f"API call failed after {max_retries} retries: {_final_summary}"
+                        _final_response = f"API 调用多次（{max_retries}）重试后失败: {_final_summary}"
                         if _is_stream_drop:
                             _final_response += (
-                                "\n\nThe provider's stream connection keeps "
-                                "dropping — this often happens when generating "
-                                "very large tool call responses (e.g. write_file "
-                                "with long content). Try asking me to use "
-                                "execute_code with Python's open() for large "
-                                "files, or to write in smaller sections."
+                                "\n\n服务端 SSE 流连接反复被中断——多为生成超大工具/文件（如 write_file）造成。"
+                                "可请求我用 execute_code/Python open() 分批写大文件，或拆小多段写。"
                             )
                         return {
                             "final_response": _final_response,
@@ -9125,7 +9065,7 @@ class AIAgent:
                             "error": _final_summary,
                         }
 
-                    # For rate limits, respect the Retry-After header if present
+                    # 针对限流，若返回 Header 里有 Retry-After，则遵循
                     _retry_after = None
                     if is_rate_limited:
                         _resp_headers = getattr(getattr(api_error, "response", None), "headers", None)
@@ -9133,40 +9073,39 @@ class AIAgent:
                             _ra_raw = _resp_headers.get("retry-after") or _resp_headers.get("Retry-After")
                             if _ra_raw:
                                 try:
-                                    _retry_after = min(int(_ra_raw), 120)  # Cap at 2 minutes
+                                    _retry_after = min(int(_ra_raw), 120)  # 最多等两分钟
                                 except (TypeError, ValueError):
                                     pass
                     wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
                     if is_rate_limited:
-                        self._emit_status(f"⏱️ Rate limit reached. Waiting {wait_time}s before retry (attempt {retry_count + 1}/{max_retries})...")
+                        self._emit_status(f"⏱️ 已限流，等待 {wait_time}s 后重试（第 {retry_count + 1}/{max_retries} 次）…")
                     else:
-                        self._emit_status(f"⏳ Retrying in {wait_time}s (attempt {retry_count}/{max_retries})...")
+                        self._emit_status(f"⏳ {wait_time}s 后重试（第 {retry_count}/{max_retries} 次）…")
                     logger.warning(
-                        "Retrying API call in %ss (attempt %s/%s) %s error=%s",
+                        "API 调用将在 %ss 后重试（第 %s/%s 次）%s error=%s",
                         wait_time,
                         retry_count,
                         max_retries,
                         self._client_log_context(),
                         api_error,
                     )
-                    # Sleep in small increments so we can respond to interrupts quickly
-                    # instead of blocking the entire wait_time in one sleep() call
+                    # 小步 sleep，允许快速响应中断
                     sleep_end = time.time() + wait_time
                     while time.time() < sleep_end:
                         if self._interrupt_requested:
-                            self._vprint(f"{self.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
+                            self._vprint(f"{self.log_prefix}⚡ 重试等待中检测到中断，终止。", force=True)
                             self._persist_session(messages, conversation_history)
                             self.clear_interrupt()
                             return {
-                                "final_response": f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries}).",
+                                "final_response": f"操作被中断：等待重试期间（第 {retry_count}/{max_retries} 次）。",
                                 "messages": messages,
                                 "api_calls": api_call_count,
                                 "completed": False,
                                 "interrupted": True,
                             }
-                        time.sleep(0.2)  # Check interrupt every 200ms
+                        time.sleep(0.2)  # 每 200ms 检查一次中断
             
-            # If the API call was interrupted, skip response processing
+            # 如果 API 调用被中断，跳过后续处理
             if interrupted:
                 _turn_exit_reason = "interrupted_during_api_call"
                 break
@@ -9174,9 +9113,7 @@ class AIAgent:
             if restart_with_compressed_messages:
                 api_call_count -= 1
                 self.iteration_budget.refund()
-                # Count compression restarts toward the retry limit to prevent
-                # infinite loops when compression reduces messages but not enough
-                # to fit the context window.
+                # 计入 retry 以防压缩反复失败后死循环
                 retry_count += 1
                 restart_with_compressed_messages = False
                 continue
@@ -9184,12 +9121,10 @@ class AIAgent:
             if restart_with_length_continuation:
                 continue
 
-            # Guard: if all retries exhausted without a successful response
-            # (e.g. repeated context-length errors that exhausted retry_count),
-            # the `response` variable is still None. Break out cleanly.
+            # 若多次重试依然返回 None，则退出
             if response is None:
                 _turn_exit_reason = "all_retries_exhausted_no_response"
-                print(f"{self.log_prefix}❌ All API retries exhausted with no successful response.")
+                print(f"{self.log_prefix}❌ 已用完所有 API 重试机会，未获成功响应。")
                 self._persist_session(messages, conversation_history)
                 break
 
@@ -9204,15 +9139,14 @@ class AIAgent:
                 else:
                     assistant_message = response.choices[0].message
                 
-                # Normalize content to string — some OpenAI-compatible servers
-                # (llama-server, etc.) return content as a dict or list instead
-                # of a plain string, which crashes downstream .strip() calls.
+                # content 字段统一为字符串——有些 OpenAI 兼容 LLM （llama-server等）会返回 dict 或 list，
+                # 下游如果 .strip() 直接用会报错。
                 if assistant_message.content is not None and not isinstance(assistant_message.content, str):
                     raw = assistant_message.content
                     if isinstance(raw, dict):
                         assistant_message.content = raw.get("text", "") or raw.get("content", "") or json.dumps(raw)
                     elif isinstance(raw, list):
-                        # Multimodal content list — extract text parts
+                        # 多模态 content list，抽取文字部分
                         parts = []
                         for part in raw:
                             if isinstance(part, str):
@@ -9250,23 +9184,22 @@ class AIAgent:
                 except Exception:
                     pass
 
-                # Handle assistant response
+                # 处理助手响应
                 if assistant_message.content and not self.quiet_mode:
                     if self.verbose_logging:
                         self._vprint(f"{self.log_prefix}🤖 Assistant: {assistant_message.content}")
                     else:
                         self._vprint(f"{self.log_prefix}🤖 Assistant: {assistant_message.content[:100]}{'...' if len(assistant_message.content) > 100 else ''}")
 
-                # Notify progress callback of model's thinking (used by subagent
-                # delegation to relay the child's reasoning to the parent display).
+                # 通知进度回调，转发“推理”内容用于子代理/父展示等
                 if (assistant_message.content and self.tool_progress_callback):
                     _think_text = assistant_message.content.strip()
-                    # Strip reasoning XML tags that shouldn't leak to parent display
+                    # 去除 reasoning/think 等标签，避免泄漏到父代理端展示
                     _think_text = re.sub(
                         r'</?(?:REASONING_SCRATCHPAD|think|reasoning)>', '', _think_text
                     ).strip()
-                    # For subagents: relay first line to parent display (existing behaviour).
-                    # For all agents with a structured callback: emit reasoning.available event.
+                    # 子代理：第一行转发到父端（保持原逻辑）。
+                    # 所有结构化回调则发 reasoning.available 事件。
                     first_line = _think_text.split('\n')[0][:80] if _think_text else ""
                     if first_line and getattr(self, '_delegate_depth', 0) > 0:
                         try:
