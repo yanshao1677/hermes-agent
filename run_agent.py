@@ -6029,31 +6029,28 @@ class AIAgent:
         if self.tools:
             api_kwargs["tools"] = self.tools
 
+        # 英文翻译中文
+
         if self.max_tokens is not None:
             api_kwargs.update(self._max_tokens_param(self.max_tokens))
         elif self._is_qwen_portal():
-            # Qwen Portal defaults to a very low max_tokens when omitted.
-            # Reasoning models (qwen3-coder-plus) exhaust that budget on
-            # thinking tokens alone, causing the portal to return
-            # finish_reason="stop" with truncated output — the agent sees
-            # this as an intentional stop and exits the loop.  Send 65536
-            # (the documented max output for qwen3-coder models) so the
-            # model has adequate output budget for tool calls.
+            # 当未指定 max_tokens 时，Qwen Portal 默认值非常低。
+            # 推理模型（如 qwen3-coder-plus）仅思考就耗尽了预算，导致 portal 返回
+            # finish_reason="stop" 并截断输出——agent 会认为这是有意的停止并退出循环。
+            # 发送 65536（qwen3-coder 系列模型的文档最大输出）以便有足够的输出预算。
             api_kwargs.update(self._max_tokens_param(65536))
         elif (self._is_openrouter_url() or "nousresearch" in self._base_url_lower) and "claude" in (self.model or "").lower():
-            # OpenRouter and Nous Portal translate requests to Anthropic's
-            # Messages API, which requires max_tokens as a mandatory field.
-            # When we omit it, the proxy picks a default that can be too
-            # low — the model spends its output budget on thinking and has
-            # almost nothing left for the actual response (especially large
-            # tool calls like write_file).  Sending the model's real output
-            # limit ensures full capacity.
+            # OpenRouter 和 Nous Portal 会转发请求到 Anthropic 的 Messages API，
+            # 该 API 需要 max_tokens 字段。未指定时，代理会选用默认值，但默认值可能太低，
+            # 导致模型仅用于思考的 tokens 就被耗尽，剩余很少用于实际回复
+            # （尤其是像 write_file 这样的较大型工具调用）。
+            # 设置成模型实际输出上限，确保完整容量。
             try:
                 from agent.anthropic_adapter import _get_anthropic_max_output
                 _model_output_limit = _get_anthropic_max_output(self.model)
                 api_kwargs["max_tokens"] = _model_output_limit
             except Exception:
-                pass  # fail open — let the proxy pick its default
+                pass  # 出错则让代理选择默认值
 
         extra_body = {}
 
@@ -6063,10 +6060,8 @@ class AIAgent:
             or "api.githubcopilot.com" in self._base_url_lower
         )
 
-        # Provider preferences (only, ignore, order, sort) are OpenRouter-
-        # specific.  Only send to OpenRouter-compatible endpoints.
-        # TODO: Nous Portal will add transparent proxy support — re-enable
-        # for _is_nous when their backend is updated.
+        # Provider 偏好设置（only, ignore, order, sort）只针对 OpenRouter，其他端点不发送。
+        # TODO：Nous Portal 未来会支持透明 proxy，请在他们后端更新后重新启用。
         if provider_preferences and _is_openrouter:
             extra_body["provider"] = provider_preferences
         _is_nous = "nousresearch" in self._base_url_lower
@@ -6079,10 +6074,9 @@ class AIAgent:
             else:
                 if self.reasoning_config is not None:
                     rc = dict(self.reasoning_config)
-                    # Nous Portal requires reasoning enabled — don't send
-                    # enabled=false to it (would cause 400).
+                    # Nous Portal 要求 reasoning.enabled=true，否则不能发送（发送 enabled=false 会报 400）。
                     if _is_nous and rc.get("enabled") is False:
-                        pass  # omit reasoning entirely for Nous when disabled
+                        pass  # Nous 且 reasoning 被关闭时完全不发 reasoning 字段
                     else:
                         extra_body["reasoning"] = rc
                 else:
@@ -6091,14 +6085,12 @@ class AIAgent:
                         "effort": "medium"
                     }
 
-        # Nous Portal product attribution
+        # Nous Portal 产品标记
         if _is_nous:
             extra_body["tags"] = ["product=hermes-agent"]
 
-        # Ollama num_ctx: override the 2048 default so the model actually
-        # uses the context window it was trained for.  Passed via the OpenAI
-        # SDK's extra_body → options.num_ctx, which Ollama's OpenAI-compat
-        # endpoint forwards to the runner as --ctx-size.
+        # Ollama num_ctx：覆盖 2048 的默认值，让模型能用训练时的 context 窗口长度。
+        # 通过 extra_body → options.num_ctx 传递，Ollama 的 OpenAI 兼容接口会转发为 --ctx-size。
         if self._ollama_num_ctx:
             options = extra_body.get("options", {})
             options["num_ctx"] = self._ollama_num_ctx
@@ -6110,25 +6102,22 @@ class AIAgent:
         if extra_body:
             api_kwargs["extra_body"] = extra_body
 
-        # xAI prompt caching: send x-grok-conv-id header to route requests
-        # to the same server, maximizing automatic cache hits.
-        # https://docs.x.ai/developers/advanced-api-usage/prompt-caching
+        # xAI prompt 缓存：发送 x-grok-conv-id 头部，确保路由到同一台服务器，最大化自动缓存命中。
+        # 参考: https://docs.x.ai/developers/advanced-api-usage/prompt-caching
         if "x.ai" in self._base_url_lower and hasattr(self, "session_id") and self.session_id:
             api_kwargs["extra_headers"] = {"x-grok-conv-id": self.session_id}
 
-        # Priority Processing / generic request overrides (e.g. service_tier).
-        # Applied last so overrides win over any defaults set above.
+        # 优先级处理/请求通用 override（如 service_tier），最后应用，确保 override 可覆盖上面设置的任意默认值。
         if self.request_overrides:
             api_kwargs.update(self.request_overrides)
 
         return api_kwargs
 
     def _supports_reasoning_extra_body(self) -> bool:
-        """Return True when reasoning extra_body is safe to send for this route/model.
+        """当可安全发送 reasoning 字段时返回 True。
 
-        OpenRouter forwards unknown extra_body fields to upstream providers.
-        Some providers/routes reject `reasoning` with 400s, so gate it to
-        known reasoning-capable model families and direct Nous Portal.
+        OpenRouter 会将未知 extra_body 字段转发给上游，有些提供方/路径不支持 reasoning 字段并会返回 400，
+        所以只对已知的支持推理的模型家族和 direct Nous Portal 开放。
         """
         if "nousresearch" in self._base_url_lower:
             return True
@@ -6158,7 +6147,7 @@ class AIAgent:
         return any(model.startswith(prefix) for prefix in reasoning_model_prefixes)
 
     def _github_models_reasoning_extra_body(self) -> dict | None:
-        """Format reasoning payload for GitHub Models/OpenAI-compatible routes."""
+        """为 GitHub Models/OpenAI 兼容路径格式化 reasoning payload。"""
         try:
             from hermes_cli.models import github_model_reasoning_efforts
         except Exception:
@@ -6190,17 +6179,15 @@ class AIAgent:
         return {"effort": requested_effort}
 
     def _build_assistant_message(self, assistant_message, finish_reason: str) -> dict:
-        """Build a normalized assistant message dict from an API response message.
+        """从 API 响应消息构建标准化的助手消息 dict。
 
-        Handles reasoning extraction, reasoning_details, and optional tool_calls
-        so both the tool-call path and the final-response path share one builder.
+        处理 reasoning 提取、reasoning_details 和可选的 tool_calls，两条路径统一处理。
         """
         reasoning_text = self._extract_reasoning(assistant_message)
         _from_structured = bool(reasoning_text)
 
-        # Fallback: extract inline <think> blocks from content when no structured
-        # reasoning fields are present (some models/providers embed thinking
-        # directly in the content rather than returning separate API fields).
+        # 回退策略：如果没有结构化 reasoning 字段，则尝试从 content 中提取内联 <think> 块
+        # 部分模型/提供方会把推理直接嵌入 content，而不是返回独立 API 字段。
         if not reasoning_text:
             content = assistant_message.content or ""
             think_blocks = re.findall(r'<think>(.*?)</think>', content, flags=re.DOTALL)
@@ -6209,17 +6196,10 @@ class AIAgent:
                 reasoning_text = combined or None
 
         if reasoning_text and self.verbose_logging:
-            logging.debug(f"Captured reasoning ({len(reasoning_text)} chars): {reasoning_text}")
+            logging.debug(f"捕获 reasoning ({len(reasoning_text)} 字符): {reasoning_text}")
 
         if reasoning_text and self.reasoning_callback:
-            # Skip callback when streaming is active — reasoning was already
-            # displayed during the stream via one of two paths:
-            #   (a) _fire_reasoning_delta (structured reasoning_content deltas)
-            #   (b) _stream_delta tag extraction (<think>/<REASONING_SCRATCHPAD>)
-            # When streaming is NOT active, always fire so non-streaming modes
-            # (gateway, batch, quiet) still get reasoning.
-            # Any reasoning that wasn't shown during streaming is caught by the
-            # CLI post-response display fallback (cli.py _reasoning_shown_this_turn).
+            # 流式模式下已展示，无需回调；非流式（gateway/batch/quiet）总是回调显示。
             if not self.stream_delta_callback:
                 try:
                     self.reasoning_callback(reasoning_text)
@@ -6234,10 +6214,7 @@ class AIAgent:
         }
 
         if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
-            # Pass reasoning_details back unmodified so providers (OpenRouter,
-            # Anthropic, OpenAI) can maintain reasoning continuity across turns.
-            # Each provider may include opaque fields (signature, encrypted_content)
-            # that must be preserved exactly.
+            # 原样传回 reasoning_details 各字段，支持多轮衔接和厂商自定义扩展。
             raw_details = assistant_message.reasoning_details
             preserved = []
             for d in raw_details:
@@ -6250,8 +6227,7 @@ class AIAgent:
             if preserved:
                 msg["reasoning_details"] = preserved
 
-        # Codex Responses API: preserve encrypted reasoning items for
-        # multi-turn continuity. These get replayed as input on the next turn.
+        # Codex Responses API: 保留加密推理项，支持多轮对话连续性
         codex_items = getattr(assistant_message, "codex_reasoning_items", None)
         if codex_items:
             msg["codex_reasoning_items"] = codex_items
@@ -6294,9 +6270,7 @@ class AIAgent:
                         "arguments": tool_call.function.arguments
                     },
                 }
-                # Preserve extra_content (e.g. Gemini thought_signature) so it
-                # is sent back on subsequent API calls.  Without this, Gemini 3
-                # thinking models reject the request with a 400 error.
+                # 保留 extra_content（如 Gemini 的 thought_signature），下次 API 调用需原样带回。
                 extra = getattr(tool_call, "extra_content", None)
                 if extra is not None:
                     if hasattr(extra, "model_dump"):
@@ -6309,20 +6283,11 @@ class AIAgent:
 
     @staticmethod
     def _sanitize_tool_calls_for_strict_api(api_msg: dict) -> dict:
-        """Strip Codex Responses API fields from tool_calls for strict providers.
+        """为严格兼容 OpenAI 协议的提供商去掉 tool_calls 中的 Codex Responses 扩展字段。
 
-        Providers like Mistral, Fireworks, and other strict OpenAI-compatible APIs
-        validate the Chat Completions schema and reject unknown fields (call_id,
-        response_item_id) with 400 or 422 errors. These fields are preserved in
-        the internal message history — this method only modifies the outgoing
-        API copy.
-
-        Creates new tool_call dicts rather than mutating in-place, so the
-        original messages list retains call_id/response_item_id for Codex
-        Responses API compatibility (e.g. if the session falls back to a
-        Codex provider later).
-
-        Fields stripped: call_id, response_item_id
+        如 Mistral/Fireworks 这类只认标准 schema 的 API，会因 call_id/response_item_id 等扩展字段直接报 400/422。
+        此方法仅修改对外 API 副本，内部消息结构保留完整，以便后续切换回 Codex 等支持扩展的 API。
+        被移除的字段: call_id, response_item_id
         """
         tool_calls = api_msg.get("tool_calls")
         if not isinstance(tool_calls, list):
@@ -6336,31 +6301,22 @@ class AIAgent:
         return api_msg
 
     def _should_sanitize_tool_calls(self) -> bool:
-        """Determine if tool_calls need sanitization for strict APIs.
+        """判断是否需要为严格 API 去除 tool_calls 的扩展字段。
 
-        Codex Responses API uses fields like call_id and response_item_id
-        that are not part of the standard Chat Completions schema. These
-        fields must be stripped when calling any other API to avoid
-        validation errors (400 Bad Request).
-
-        Returns:
-            bool: True if sanitization is needed (non-Codex API), False otherwise.
+        Codex Responses API 扩展了 call_id/response_item_id 等字段，非标准协议时需剥离防止报错。
+        返回值:
+            True — 非 codex_responses API 时需剥离
+            False — codex_responses 时保留扩展
         """
         return self.api_mode != "codex_responses"
 
     def flush_memories(self, messages: list = None, min_turns: int = None):
-        """Give the model one turn to persist memories before context is lost.
+        """让模型在丢失上下文之前有一次保存 memory 的机会。
 
-        Called before compression, session reset, or CLI exit. Injects a flush
-        message, makes one API call, executes any memory tool calls, then
-        strips all flush artifacts from the message list.
-
-        Args:
-            messages: The current conversation messages. If None, uses
-                      self._session_messages (last run_conversation state).
-            min_turns: Minimum user turns required to trigger the flush.
-                       None = use config value (flush_min_turns).
-                       0 = always flush (used for compression).
+        压缩/会话重置/CLI 退出前调用。追加 flush 消息，仅允许 memory tool，执行后去除所有 flush 相关内容。
+        参数:
+            messages: 当前对话消息（为 None 时用 self._session_messages）。
+            min_turns: 需达到的用户轮次，None=用默认配置（flush_min_turns），0=总是 flush（如压缩时）。
         """
         if self._memory_flush_min_turns == 0 and min_turns is None:
             return
@@ -6376,16 +6332,14 @@ class AIAgent:
             return
 
         flush_content = (
-            "[System: The session is being compressed. "
-            "Save anything worth remembering — prioritize user preferences, "
-            "corrections, and recurring patterns over task-specific details.]"
+            "[System: 当前对话将被压缩，请保存任何值得长期记忆的内容——优先保存用户偏好、纠正与反复操作的模式，其次是具体任务细节。]"
         )
         _sentinel = f"__flush_{id(self)}_{time.monotonic()}"
         flush_msg = {"role": "user", "content": flush_content, "_flush_sentinel": _sentinel}
         messages.append(flush_msg)
 
         try:
-            # Build API messages for the flush call
+            # 构建 flush 用的 API 消息副本
             _needs_sanitize = self._should_sanitize_tool_calls()
             api_messages = []
             for msg in messages:
@@ -6405,7 +6359,7 @@ class AIAgent:
             if self._cached_system_prompt:
                 api_messages = [{"role": "system", "content": self._cached_system_prompt}] + api_messages
 
-            # Make one API call with only the memory tool available
+            # 只使用 memory 工具进行一次 API 调用
             memory_tool_def = None
             for t in (self.tools or []):
                 if t.get("function", {}).get("name") == "memory":
@@ -6413,11 +6367,10 @@ class AIAgent:
                     break
 
             if not memory_tool_def:
-                messages.pop()  # remove flush msg
+                messages.pop()  # 移除 flush 消息
                 return
 
-            # Use auxiliary client for the flush call when available --
-            # it's cheaper and avoids Codex Responses API incompatibility.
+            # 辅助客户端优先，用于 memory flush，省钱，亦规避了 Codex 扩展不兼容
             from agent.auxiliary_client import call_llm as _call_llm
             _aux_available = True
             try:
@@ -6427,14 +6380,14 @@ class AIAgent:
                     tools=[memory_tool_def],
                     temperature=0.3,
                     max_tokens=5120,
-                    # timeout resolved from auxiliary.flush_memories.timeout config
+                    # 超时配置由 auxiliary.flush_memories.timeout 决定
                 )
             except RuntimeError:
                 _aux_available = False
                 response = None
 
             if not _aux_available and self.api_mode == "codex_responses":
-                # No auxiliary client -- use the Codex Responses path directly
+                # 没有辅助客户端，走 Codex Responses 模式
                 codex_kwargs = self._build_api_kwargs(api_messages)
                 codex_kwargs["tools"] = self._responses_tools([memory_tool_def])
                 codex_kwargs["temperature"] = 0.3
@@ -6442,7 +6395,7 @@ class AIAgent:
                     codex_kwargs["max_output_tokens"] = 5120
                 response = self._run_codex_stream(codex_kwargs)
             elif not _aux_available and self.api_mode == "anthropic_messages":
-                # Native Anthropic — use the Anthropic client directly
+                # 原生 Anthropic 调用
                 from agent.anthropic_adapter import build_anthropic_kwargs as _build_ant_kwargs
                 ant_kwargs = _build_ant_kwargs(
                     model=self.model, messages=api_messages,
@@ -6464,7 +6417,7 @@ class AIAgent:
                     **api_kwargs, timeout=_get_task_timeout("flush_memories")
                 )
 
-            # Extract tool calls from the response, handling all API formats
+            # 提取 memory 工具调用结果，通用支持多种返回格式
             tool_calls = []
             if self.api_mode == "codex_responses" and not _aux_available:
                 assistant_msg, _ = self._normalize_codex_response(response)
@@ -6494,14 +6447,13 @@ class AIAgent:
                             store=self._memory_store,
                         )
                         if not self.quiet_mode:
-                            print(f"  🧠 Memory flush: saved to {args.get('target', 'memory')}")
+                            print(f"  🧠 Memory flush: 已保存到 {args.get('target', 'memory')}")
                     except Exception as e:
-                        logger.debug("Memory flush tool call failed: %s", e)
+                        logger.debug("Memory flush 工具调用失败: %s", e)
         except Exception as e:
-            logger.debug("Memory flush API call failed: %s", e)
+            logger.debug("Memory flush API 调用失败: %s", e)
         finally:
-            # Strip flush artifacts: remove everything from the flush message onward.
-            # Use sentinel marker instead of identity check for robustness.
+            # 去除 flush 相关内容，从 flush 消息开始的所有内容全部移除
             while messages and messages[-1].get("_flush_sentinel") != _sentinel:
                 messages.pop()
                 if not messages:
@@ -6510,27 +6462,25 @@ class AIAgent:
                 messages.pop()
 
     def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None) -> tuple:
-        """Compress conversation context and split the session in SQLite.
+        """对话上下文压缩，并进行 SQLite 会话拆分。
 
-        Args:
-            focus_topic: Optional focus string for guided compression — the
-                summariser will prioritise preserving information related to
-                this topic.  Inspired by Claude Code's ``/compact <focus>``.
+        参数:
+            focus_topic: 可选，指定聚焦压缩的主题，优先保留关联内容，灵感源自 Claude Code 的 `/compact <focus>`。
 
-        Returns:
-            (compressed_messages, new_system_prompt) tuple
+        返回:
+            (压缩后消息, 新 system prompt)
         """
         _pre_msg_count = len(messages)
         logger.info(
-            "context compression started: session=%s messages=%d tokens=~%s model=%s focus=%r",
+            "开始上下文压缩: session=%s 消息数=%d 预计tokens=~%s model=%s 聚焦=%r",
             self.session_id or "none", _pre_msg_count,
             f"{approx_tokens:,}" if approx_tokens else "unknown", self.model,
             focus_topic,
         )
-        # Pre-compression memory flush: let the model save memories before they're lost
+        # 压缩前 flush 一次 memory，避免信息丢失
         self.flush_memories(messages, min_turns=0)
 
-        # Notify external memory provider before compression discards context
+        # 通知外部 memory provider 上下文即将丢弃（如有）
         if self._memory_manager:
             try:
                 self._memory_manager.on_pre_compress(messages)
@@ -6549,12 +6499,11 @@ class AIAgent:
 
         if self._session_db:
             try:
-                # Propagate title to the new session with auto-numbering
+                # 标题/编号迁移到新会话
                 old_title = self._session_db.get_session_title(self.session_id)
                 self._session_db.end_session(self.session_id, "compression")
                 old_session_id = self.session_id
                 self.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-                # Update session_log_file to point to the new session's JSON file
                 self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
                 self._session_db.create_session(
                     session_id=self.session_id,
@@ -6562,30 +6511,26 @@ class AIAgent:
                     model=self.model,
                     parent_session_id=old_session_id,
                 )
-                # Auto-number the title for the continuation session
                 if old_title:
                     try:
                         new_title = self._session_db.get_next_title_in_lineage(old_title)
                         self._session_db.set_session_title(self.session_id, new_title)
                     except (ValueError, Exception) as e:
-                        logger.debug("Could not propagate title on compression: %s", e)
+                        logger.debug("压缩拆分标题迁移失败: %s", e)
                 self._session_db.update_system_prompt(self.session_id, new_system_prompt)
-                # Reset flush cursor — new session starts with no messages written
                 self._last_flushed_db_idx = 0
             except Exception as e:
-                logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
+                logger.warning("Session DB 压缩拆分失败，新会话将不会被索引: %s", e)
 
-        # Warn on repeated compressions (quality degrades with each pass)
+        # 多次压缩提醒，建议/new 新会话提高质量
         _cc = self.context_compressor.compression_count
         if _cc >= 2:
             self._vprint(
-                f"{self.log_prefix}⚠️  Session compressed {_cc} times — "
-                f"accuracy may degrade. Consider /new to start fresh.",
+                f"{self.log_prefix}⚠️  会话已压缩 {_cc} 次，准确度可能下降。建议 /new 开始新对话。",
                 force=True,
             )
 
-        # Update token estimate after compaction so pressure calculations
-        # use the post-compression count, not the stale pre-compression one.
+        # 压缩后重估 token，后续压力判断用新值
         _compressed_est = (
             estimate_tokens_rough(new_system_prompt)
             + estimate_messages_tokens_rough(compressed)
@@ -6593,23 +6538,15 @@ class AIAgent:
         self.context_compressor.last_prompt_tokens = _compressed_est
         self.context_compressor.last_completion_tokens = 0
 
-        # Only reset the pressure warning if compression actually brought
-        # us below the warning level (85% of threshold).  When compression
-        # can't reduce enough (e.g. threshold is very low, or system prompt
-        # alone exceeds the warning level), keep the tier set to prevent
-        # spamming the user with repeated warnings every loop iteration.
+        # 若已压缩到警戒线以下（85%），则重置压力提示，否者保持以防重复刷屏
         if self.context_compressor.threshold_tokens > 0:
             _post_progress = _compressed_est / self.context_compressor.threshold_tokens
             if _post_progress < 0.85:
                 self._context_pressure_warned_at = 0.0
-                # Clear class-level dedup for this session so a fresh
-                # warning cycle can start if context grows again.
                 _sid = self.session_id or "default"
                 AIAgent._context_pressure_last_warned.pop(_sid, None)
 
-        # Clear the file-read dedup cache.  After compression the original
-        # read content is summarised away — if the model re-reads the same
-        # file it needs the full content, not a "file unchanged" stub.
+        # 清空文件读取去重缓存，压缩后旧内容已被摘要，后续如再次读取需重新获取完整内容。
         try:
             from tools.file_tools import reset_file_dedup
             reset_file_dedup(task_id)
@@ -6617,22 +6554,20 @@ class AIAgent:
             pass
 
         logger.info(
-            "context compression done: session=%s messages=%d->%d tokens=~%s",
+            "上下文压缩完成: session=%s 消息数=%d->%d tokens=~%s",
             self.session_id or "none", _pre_msg_count, len(compressed),
             f"{_compressed_est:,}",
         )
         return compressed, new_system_prompt
 
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
-        """Execute tool calls from the assistant message and append results to messages.
+        """执行助手消息中的 tool_calls，并将结果追加到 messages。
 
-        Dispatches to concurrent execution only for batches that look
-        independent: read-only tools may always share the parallel path, while
-        file reads/writes may do so only when their target paths do not overlap.
+        只有当工具组“相互独立”时才并发执行；读操作可总是并发，文件读写需路径不重叠才并发。
         """
         tool_calls = assistant_message.tool_calls
 
-        # Allow _vprint during tool execution even with stream consumers
+        # 允许 tool 执行期间可通过 _vprint 输出日志（即使有流式消费者）
         self._executing_tools = True
         try:
             if not _should_parallelize_tool_batch(tool_calls):
@@ -6648,11 +6583,9 @@ class AIAgent:
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
                      tool_call_id: Optional[str] = None) -> str:
-        """Invoke a single tool and return the result string. No display logic.
+        """调用指定工具并返回结果字符串，无 UI 展示逻辑。
 
-        Handles both agent-level tools (todo, memory, etc.) and registry-dispatched
-        tools. Used by the concurrent execution path; the sequential path retains
-        its own inline invocation for backward-compatible display handling.
+        兼容 agent 级的工具（todo/memory 等）和注册表分发的工具。并发模式调用本方法，串行模式保留内联调用以保证老的显示行为。
         """
         if function_name == "todo":
             from tools.todo_tool import todo_tool as _todo_tool
@@ -6682,7 +6615,7 @@ class AIAgent:
                 old_text=function_args.get("old_text"),
                 store=self._memory_store,
             )
-            # Bridge: notify external memory provider of built-in memory writes
+            # 桥接：通知外部 memory provider 本地 memory 写入动作
             if self._memory_manager and function_args.get("action") in ("add", "replace"):
                 try:
                     self._memory_manager.on_memory_write(
@@ -6721,31 +6654,29 @@ class AIAgent:
             )
 
     def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
-        """Execute multiple tool calls concurrently using a thread pool.
+        """使用线程池并发执行多个工具，结果顺序追加到 messages，保证 API 期待顺序。
 
-        Results are collected in the original tool-call order and appended to
-        messages so the API sees them in the expected sequence.
         """
         tool_calls = assistant_message.tool_calls
         num_tools = len(tool_calls)
 
-        # ── Pre-flight: interrupt check ──────────────────────────────────
+        # ── 执行前: 用户主动中断检查 ──────────────────────────────────
         if self._interrupt_requested:
-            print(f"{self.log_prefix}⚡ Interrupt: skipping {num_tools} tool call(s)")
+            print(f"{self.log_prefix}⚡ 中断：跳过 {num_tools} 个工具调用")
             for tc in tool_calls:
                 messages.append({
                     "role": "tool",
-                    "content": f"[Tool execution cancelled — {tc.function.name} was skipped due to user interrupt]",
+                    "content": f"[工具已取消执行——{tc.function.name} 因用户中断被跳过]",
                     "tool_call_id": tc.id,
                 })
             return
 
-        # ── Parse args + pre-execution bookkeeping ───────────────────────
-        parsed_calls = []  # list of (tool_call, function_name, function_args)
+        # ── 参数解析及执行前准备 ─────────────────────────────────────
+        parsed_calls = []  # (tool_call, function_name, function_args) 数组
         for tool_call in tool_calls:
             function_name = tool_call.function.name
 
-            # Reset nudge counters
+            # 重置 nudge 计数
             if function_name == "memory":
                 self._turns_since_memory = 0
             elif function_name == "skill_manage":
@@ -6758,7 +6689,7 @@ class AIAgent:
             if not isinstance(function_args, dict):
                 function_args = {}
 
-            # Checkpoint for file-mutating tools
+            # 文件写等操作做 checkpoint
             if function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
                 try:
                     file_path = function_args.get("path", "")
@@ -6768,7 +6699,7 @@ class AIAgent:
                 except Exception:
                     pass
 
-            # Checkpoint before destructive terminal commands
+            # 破坏性终端命令 checkpoint
             if function_name == "terminal" and self._checkpoint_mgr.enabled:
                 try:
                     cmd = function_args.get("command", "")
@@ -6782,18 +6713,18 @@ class AIAgent:
 
             parsed_calls.append((tool_call, function_name, function_args))
 
-        # ── Logging / callbacks ──────────────────────────────────────────
+        # ── 日志/callbacks ────────────────────────────────────────────
         tool_names_str = ", ".join(name for _, name, _ in parsed_calls)
         if not self.quiet_mode:
-            print(f"  ⚡ Concurrent: {num_tools} tool calls — {tool_names_str}")
+            print(f"  ⚡ 并发: {num_tools} 个工具调用 — {tool_names_str}")
             for i, (tc, name, args) in enumerate(parsed_calls, 1):
                 args_str = json.dumps(args, ensure_ascii=False)
                 if self.verbose_logging:
-                    print(f"  📞 Tool {i}: {name}({list(args.keys())})")
-                    print(f"     Args: {args_str}")
+                    print(f"  📞 工具 {i}: {name}({list(args.keys())})")
+                    print(f"     参数: {args_str}")
                 else:
                     args_preview = args_str[:self.log_prefix_chars] + "..." if len(args_str) > self.log_prefix_chars else args_str
-                    print(f"  📞 Tool {i}: {name}({list(args.keys())}) - {args_preview}")
+                    print(f"  📞 工具 {i}: {name}({list(args.keys())}) - {args_preview}")
 
         for tc, name, args in parsed_calls:
             if self.tool_progress_callback:
@@ -6801,40 +6732,40 @@ class AIAgent:
                     preview = _build_tool_preview(name, args)
                     self.tool_progress_callback("tool.started", name, preview, args)
                 except Exception as cb_err:
-                    logging.debug(f"Tool progress callback error: {cb_err}")
+                    logging.debug(f"工具进度回调异常: {cb_err}")
 
         for tc, name, args in parsed_calls:
             if self.tool_start_callback:
                 try:
                     self.tool_start_callback(tc.id, name, args)
                 except Exception as cb_err:
-                    logging.debug(f"Tool start callback error: {cb_err}")
+                    logging.debug(f"工具开始回调异常: {cb_err}")
 
-        # ── Concurrent execution ─────────────────────────────────────────
-        # Each slot holds (function_name, function_args, function_result, duration, error_flag)
+        # ── 并发执行（线程池/收集原始顺序结果）─────────────────────────
+        # 后续内容（如 _run_tool, 结果收集）未做翻译，仅至标记止。
         results = [None] * num_tools
 
         def _run_tool(index, tool_call, function_name, function_args):
-            """Worker function executed in a thread."""
+            """在线程中执行的工作函数。"""
             start = time.time()
             try:
                 result = self._invoke_tool(function_name, function_args, effective_task_id, tool_call.id)
             except Exception as tool_error:
-                result = f"Error executing tool '{function_name}': {tool_error}"
-                logger.error("_invoke_tool raised for %s: %s", function_name, tool_error, exc_info=True)
+                result = f"执行工具 '{function_name}' 时出错: {tool_error}"
+                logger.error("_invoke_tool 执行时发生异常 %s: %s", function_name, tool_error, exc_info=True)
             duration = time.time() - start
             is_error, _ = _detect_tool_failure(function_name, result)
             if is_error:
-                logger.info("tool %s failed (%.2fs): %s", function_name, duration, result[:200])
+                logger.info("工具 %s 失败 (%.2fs): %s", function_name, duration, result[:200])
             else:
-                logger.info("tool %s completed (%.2fs, %d chars)", function_name, duration, len(result))
+                logger.info("工具 %s 完成 (%.2fs, %d 字符)", function_name, duration, len(result))
             results[index] = (function_name, function_args, result, duration, is_error)
 
-        # Start spinner for CLI mode (skip when TUI handles tool progress)
+        # CLI 模式下启动动画（TUI 负责工具进度时跳过）
         spinner = None
         if self._should_emit_quiet_tool_messages() and self._should_start_quiet_spinner():
             face = random.choice(KawaiiSpinner.KAWAII_WAITING)
-            spinner = KawaiiSpinner(f"{face} ⚡ running {num_tools} tools concurrently", spinner_type='dots', print_fn=self._print_fn)
+            spinner = KawaiiSpinner(f"{face} ⚡ 正在并发运行 {num_tools} 个工具", spinner_type='dots', print_fn=self._print_fn)
             spinner.start()
 
         try:
@@ -6845,28 +6776,28 @@ class AIAgent:
                     f = executor.submit(_run_tool, i, tc, name, args)
                     futures.append(f)
 
-                # Wait for all to complete (exceptions are captured inside _run_tool)
+                # 等待所有并发工具完成（异常已在 _run_tool 内部捕获）
                 concurrent.futures.wait(futures)
         finally:
             if spinner:
-                # Build a summary message for the spinner stop
+                # 为动画停止生成摘要信息
                 completed = sum(1 for r in results if r is not None)
                 total_dur = sum(r[3] for r in results if r is not None)
-                spinner.stop(f"⚡ {completed}/{num_tools} tools completed in {total_dur:.1f}s total")
+                spinner.stop(f"⚡ {completed}/{num_tools} 个工具共用时 {total_dur:.1f} 秒完成")
 
-        # ── Post-execution: display per-tool results ─────────────────────
+        # ── 工具执行后: 展示单个工具结果 ────────────────
         for i, (tc, name, args) in enumerate(parsed_calls):
             r = results[i]
             if r is None:
-                # Shouldn't happen, but safety fallback
-                function_result = f"Error executing tool '{name}': thread did not return a result"
+                # 理论上不会发生，安全兜底
+                function_result = f"执行工具 '{name}' 时出错：线程未返回结果"
                 tool_duration = 0.0
             else:
                 function_name, function_args, function_result, tool_duration, is_error = r
 
                 if is_error:
                     result_preview = function_result[:200] if len(function_result) > 200 else function_result
-                    logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
+                    logger.warning("工具 %s 返回错误 (%.2fs): %s", function_name, tool_duration, result_preview)
 
                 if self.tool_progress_callback:
                     try:
@@ -6875,32 +6806,32 @@ class AIAgent:
                             duration=tool_duration, is_error=is_error,
                         )
                     except Exception as cb_err:
-                        logging.debug(f"Tool progress callback error: {cb_err}")
+                        logging.debug(f"工具进度回调出错: {cb_err}")
 
                 if self.verbose_logging:
-                    logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
-                    logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
+                    logging.debug(f"工具 {function_name} 完成耗时 {tool_duration:.2f}秒")
+                    logging.debug(f"工具结果（{len(function_result)} 字符）: {function_result}")
 
-            # Print cute message per tool
+            # 每个工具打印可爱提示
             if self._should_emit_quiet_tool_messages():
                 cute_msg = _get_cute_tool_message_impl(name, args, tool_duration, result=function_result)
                 self._safe_print(f"  {cute_msg}")
             elif not self.quiet_mode:
                 if self.verbose_logging:
-                    print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s")
-                    print(f"     Result: {function_result}")
+                    print(f"  ✅ 工具 {i+1} 完成，耗时 {tool_duration:.2f}秒")
+                    print(f"     结果: {function_result}")
                 else:
                     response_preview = function_result[:self.log_prefix_chars] + "..." if len(function_result) > self.log_prefix_chars else function_result
-                    print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s - {response_preview}")
+                    print(f"  ✅ 工具 {i+1} 完成，耗时 {tool_duration:.2f}秒 - {response_preview}")
 
             self._current_tool = None
-            self._touch_activity(f"tool completed: {name} ({tool_duration:.1f}s)")
+            self._touch_activity(f"工具完成: {name}（{tool_duration:.1f}秒）")
 
             if self.tool_complete_callback:
                 try:
                     self.tool_complete_callback(tc.id, name, args, function_result)
                 except Exception as cb_err:
-                    logging.debug(f"Tool complete callback error: {cb_err}")
+                    logging.debug(f"工具完成回调出错: {cb_err}")
 
             function_result = maybe_persist_tool_result(
                 content=function_result,
@@ -6920,27 +6851,26 @@ class AIAgent:
             }
             messages.append(tool_msg)
 
-        # ── Per-turn aggregate budget enforcement ─────────────────────────
+        # ── 每轮预算约束 ────────────────
         num_tools = len(parsed_calls)
         if num_tools > 0:
             turn_tool_msgs = messages[-num_tools:]
             enforce_turn_budget(turn_tool_msgs, env=get_active_env(effective_task_id))
 
     def _execute_tool_calls_sequential(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
-        """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
+        """串行执行工具调用（原始实现）。用于单个工具或交互式工具。"""
         for i, tool_call in enumerate(assistant_message.tool_calls, 1):
-            # SAFETY: check interrupt BEFORE starting each tool.
-            # If the user sent "stop" during a previous tool's execution,
-            # do NOT start any more tools -- skip them all immediately.
+            # 安全：在每个工具开始前判断中断。
+            # 如果用户在前一个工具执行期间发送了“停止”，则不应再启动新的工具--全部立即跳过。
             if self._interrupt_requested:
                 remaining_calls = assistant_message.tool_calls[i-1:]
                 if remaining_calls:
-                    self._vprint(f"{self.log_prefix}⚡ Interrupt: skipping {len(remaining_calls)} tool call(s)", force=True)
+                    self._vprint(f"{self.log_prefix}⚡ 中断：跳过 {len(remaining_calls)} 个工具调用", force=True)
                 for skipped_tc in remaining_calls:
                     skipped_name = skipped_tc.function.name
                     skip_msg = {
                         "role": "tool",
-                        "content": f"[Tool execution cancelled — {skipped_name} was skipped due to user interrupt]",
+                        "content": f"[工具执行已取消 — {skipped_name} 因用户中断被跳过]",
                         "tool_call_id": skipped_tc.id,
                     }
                     messages.append(skip_msg)
@@ -6948,7 +6878,7 @@ class AIAgent:
 
             function_name = tool_call.function.name
 
-            # Reset nudge counters when the relevant tool is actually used
+            # 实际使用相关工具时重置提示计数器
             if function_name == "memory":
                 self._turns_since_memory = 0
             elif function_name == "skill_manage":
@@ -6957,7 +6887,7 @@ class AIAgent:
             try:
                 function_args = json.loads(tool_call.function.arguments)
             except json.JSONDecodeError as e:
-                logging.warning(f"Unexpected JSON error after validation: {e}")
+                logging.warning(f"校验后遇到异常 JSON：{e}")
                 function_args = {}
             if not isinstance(function_args, dict):
                 function_args = {}
@@ -6965,18 +6895,16 @@ class AIAgent:
             if not self.quiet_mode:
                 args_str = json.dumps(function_args, ensure_ascii=False)
                 if self.verbose_logging:
-                    print(f"  📞 Tool {i}: {function_name}({list(function_args.keys())})")
-                    print(f"     Args: {args_str}")
+                    print(f"  📞 工具 {i}: {function_name}({list(function_args.keys())})")
+                    print(f"     参数: {args_str}")
                 else:
                     args_preview = args_str[:self.log_prefix_chars] + "..." if len(args_str) > self.log_prefix_chars else args_str
-                    print(f"  📞 Tool {i}: {function_name}({list(function_args.keys())}) - {args_preview}")
+                    print(f"  📞 工具 {i}: {function_name}({list(function_args.keys())}) - {args_preview}")
 
             self._current_tool = function_name
-            self._touch_activity(f"executing tool: {function_name}")
+            self._touch_activity(f"正在执行工具: {function_name}")
 
-            # Set activity callback for long-running tool execution (terminal
-            # commands, etc.) so the gateway's inactivity monitor doesn't kill
-            # the agent while a command is running.
+            # 为长耗时工具（终端命令等）设置活动回调，防止代理因不活动被杀掉
             try:
                 from tools.environments.base import set_activity_callback
                 set_activity_callback(self._touch_activity)
@@ -6988,15 +6916,15 @@ class AIAgent:
                     preview = _build_tool_preview(function_name, function_args)
                     self.tool_progress_callback("tool.started", function_name, preview, function_args)
                 except Exception as cb_err:
-                    logging.debug(f"Tool progress callback error: {cb_err}")
+                    logging.debug(f"工具进度回调出错: {cb_err}")
 
             if self.tool_start_callback:
                 try:
                     self.tool_start_callback(tool_call.id, function_name, function_args)
                 except Exception as cb_err:
-                    logging.debug(f"Tool start callback error: {cb_err}")
+                    logging.debug(f"工具开始回调出错: {cb_err}")
 
-            # Checkpoint: snapshot working dir before file-mutating tools
+            # 检查点: 对可修改文件工具创建快照
             if function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
                 try:
                     file_path = function_args.get("path", "")
@@ -7006,9 +6934,9 @@ class AIAgent:
                             work_dir, f"before {function_name}"
                         )
                 except Exception:
-                    pass  # never block tool execution
+                    pass  # 永不阻塞工具执行
 
-            # Checkpoint before destructive terminal commands
+            # 对破坏性终端命令前做检查点
             if function_name == "terminal" and self._checkpoint_mgr.enabled:
                 try:
                     cmd = function_args.get("command", "")
@@ -7018,7 +6946,7 @@ class AIAgent:
                             cwd, f"before terminal: {cmd[:60]}"
                         )
                 except Exception:
-                    pass  # never block tool execution
+                    pass  # 永不阻塞工具执行
 
             tool_start_time = time.time()
 
@@ -7034,7 +6962,7 @@ class AIAgent:
                     self._vprint(f"  {_get_cute_tool_message_impl('todo', function_args, tool_duration, result=function_result)}")
             elif function_name == "session_search":
                 if not self._session_db:
-                    function_result = json.dumps({"success": False, "error": "Session database not available."})
+                    function_result = json.dumps({"success": False, "error": "会话数据库不可用。"})
                 else:
                     from tools.session_search_tool import session_search as _session_search
                     function_result = _session_search(
@@ -7074,10 +7002,10 @@ class AIAgent:
                 from tools.delegate_tool import delegate_task as _delegate_task
                 tasks_arg = function_args.get("tasks")
                 if tasks_arg and isinstance(tasks_arg, list):
-                    spinner_label = f"🔀 delegating {len(tasks_arg)} tasks"
+                    spinner_label = f"🔀 正在分配 {len(tasks_arg)} 个任务"
                 else:
                     goal_preview = (function_args.get("goal") or "")[:30]
-                    spinner_label = f"🔀 {goal_preview}" if goal_preview else "🔀 delegating"
+                    spinner_label = f"🔀 {goal_preview}" if goal_preview else "🔀 正在分配"
                 spinner = None
                 if self._should_emit_quiet_tool_messages() and self._should_start_quiet_spinner():
                     face = random.choice(KawaiiSpinner.KAWAII_WAITING)
@@ -7104,7 +7032,7 @@ class AIAgent:
                     elif self._should_emit_quiet_tool_messages():
                         self._vprint(f"  {cute_msg}")
             elif self._context_engine_tool_names and function_name in self._context_engine_tool_names:
-                # Context engine tools (lcm_grep, lcm_describe, lcm_expand, etc.)
+                # 上下文引擎工具（lcm_grep, lcm_describe, lcm_expand 等）
                 spinner = None
                 if self.quiet_mode and not self.tool_progress_callback:
                     face = random.choice(KawaiiSpinner.KAWAII_WAITING)
@@ -7117,8 +7045,8 @@ class AIAgent:
                     function_result = self.context_compressor.handle_tool_call(function_name, function_args, messages=messages)
                     _ce_result = function_result
                 except Exception as tool_error:
-                    function_result = json.dumps({"error": f"Context engine tool '{function_name}' failed: {tool_error}"})
-                    logger.error("context_engine.handle_tool_call raised for %s: %s", function_name, tool_error, exc_info=True)
+                    function_result = json.dumps({"error": f"上下文引擎工具 '{function_name}' 执行失败: {tool_error}"})
+                    logger.error("context_engine.handle_tool_call 执行时发生异常 %s: %s", function_name, tool_error, exc_info=True)
                 finally:
                     tool_duration = time.time() - tool_start_time
                     cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_ce_result)
@@ -7127,8 +7055,8 @@ class AIAgent:
                     elif self.quiet_mode:
                         self._vprint(f"  {cute_msg}")
             elif self._memory_manager and self._memory_manager.has_tool(function_name):
-                # Memory provider tools (hindsight_retain, honcho_search, etc.)
-                # These are not in the tool registry — route through MemoryManager.
+                # 内存工具（hindsight_retain, honcho_search 等）
+                # 非注册工具—通过MemoryManager路由
                 spinner = None
                 if self._should_emit_quiet_tool_messages() and self._should_start_quiet_spinner():
                     face = random.choice(KawaiiSpinner.KAWAII_WAITING)
@@ -7141,8 +7069,8 @@ class AIAgent:
                     function_result = self._memory_manager.handle_tool_call(function_name, function_args)
                     _mem_result = function_result
                 except Exception as tool_error:
-                    function_result = json.dumps({"error": f"Memory tool '{function_name}' failed: {tool_error}"})
-                    logger.error("memory_manager.handle_tool_call raised for %s: %s", function_name, tool_error, exc_info=True)
+                    function_result = json.dumps({"error": f"内存工具 '{function_name}' 执行失败: {tool_error}"})
+                    logger.error("memory_manager.handle_tool_call 执行时发生异常 %s: %s", function_name, tool_error, exc_info=True)
                 finally:
                     tool_duration = time.time() - tool_start_time
                     cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_mem_result)
@@ -7168,8 +7096,8 @@ class AIAgent:
                     )
                     _spinner_result = function_result
                 except Exception as tool_error:
-                    function_result = f"Error executing tool '{function_name}': {tool_error}"
-                    logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
+                    function_result = f"执行工具 '{function_name}' 时出错: {tool_error}"
+                    logger.error("handle_function_call 执行时发生异常 %s: %s", function_name, tool_error, exc_info=True)
                 finally:
                     tool_duration = time.time() - tool_start_time
                     cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_spinner_result)
@@ -7186,21 +7114,20 @@ class AIAgent:
                         enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                     )
                 except Exception as tool_error:
-                    function_result = f"Error executing tool '{function_name}': {tool_error}"
-                    logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
+                    function_result = f"执行工具 '{function_name}' 时出错: {tool_error}"
+                    logger.error("handle_function_call 执行时发生异常 %s: %s", function_name, tool_error, exc_info=True)
                 tool_duration = time.time() - tool_start_time
 
             result_preview = function_result if self.verbose_logging else (
                 function_result[:200] if len(function_result) > 200 else function_result
             )
 
-            # Log tool errors to the persistent error log so [error] tags
-            # in the UI always have a corresponding detailed entry on disk.
+            # 工具错误日志持久化，保证UI的 [error] 标签有日志可追溯
             _is_error_result, _ = _detect_tool_failure(function_name, function_result)
             if _is_error_result:
-                logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
+                logger.warning("工具 %s 返回错误 (%.2fs): %s", function_name, tool_duration, result_preview)
             else:
-                logger.info("tool %s completed (%.2fs, %d chars)", function_name, tool_duration, len(function_result))
+                logger.info("工具 %s 完成 (%.2fs, %d 字符)", function_name, tool_duration, len(function_result))
 
             if self.tool_progress_callback:
                 try:
@@ -7209,20 +7136,20 @@ class AIAgent:
                         duration=tool_duration, is_error=_is_error_result,
                     )
                 except Exception as cb_err:
-                    logging.debug(f"Tool progress callback error: {cb_err}")
+                    logging.debug(f"工具进度回调出错: {cb_err}")
 
             self._current_tool = None
-            self._touch_activity(f"tool completed: {function_name} ({tool_duration:.1f}s)")
+            self._touch_activity(f"工具完成: {function_name}（{tool_duration:.1f}秒）")
 
             if self.verbose_logging:
-                logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
-                logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
+                logging.debug(f"工具 {function_name} 完成耗时 {tool_duration:.2f}秒")
+                logging.debug(f"工具结果（{len(function_result)} 字符）: {function_result}")
 
             if self.tool_complete_callback:
                 try:
                     self.tool_complete_callback(tool_call.id, function_name, function_args, function_result)
                 except Exception as cb_err:
-                    logging.debug(f"Tool complete callback error: {cb_err}")
+                    logging.debug(f"工具完成回调出错: {cb_err}")
 
             function_result = maybe_persist_tool_result(
                 content=function_result,
@@ -7231,7 +7158,7 @@ class AIAgent:
                 env=get_active_env(effective_task_id),
             )
 
-            # Discover subdirectory context files from tool arguments
+            # 从工具参数中发现子目录上下文文件
             subdir_hints = self._subdirectory_hints.check_tool_call(function_name, function_args)
             if subdir_hints:
                 function_result += subdir_hints
@@ -7245,20 +7172,20 @@ class AIAgent:
 
             if not self.quiet_mode:
                 if self.verbose_logging:
-                    print(f"  ✅ Tool {i} completed in {tool_duration:.2f}s")
-                    print(f"     Result: {function_result}")
+                    print(f"  ✅ 工具 {i} 完成，耗时 {tool_duration:.2f}秒")
+                    print(f"     结果: {function_result}")
                 else:
                     response_preview = function_result[:self.log_prefix_chars] + "..." if len(function_result) > self.log_prefix_chars else function_result
-                    print(f"  ✅ Tool {i} completed in {tool_duration:.2f}s - {response_preview}")
+                    print(f"  ✅ 工具 {i} 完成，耗时 {tool_duration:.2f}秒 - {response_preview}")
 
             if self._interrupt_requested and i < len(assistant_message.tool_calls):
                 remaining = len(assistant_message.tool_calls) - i
-                self._vprint(f"{self.log_prefix}⚡ Interrupt: skipping {remaining} remaining tool call(s)", force=True)
+                self._vprint(f"{self.log_prefix}⚡ 中断：跳过剩余 {remaining} 个工具调用", force=True)
                 for skipped_tc in assistant_message.tool_calls[i:]:
                     skipped_name = skipped_tc.function.name
                     skip_msg = {
                         "role": "tool",
-                        "content": f"[Tool execution skipped — {skipped_name} was not started. User sent a new message]",
+                        "content": f"[工具执行跳过 — {skipped_name} 未启动。用户已发新消息]",
                         "tool_call_id": skipped_tc.id
                     }
                     messages.append(skip_msg)
@@ -7267,7 +7194,7 @@ class AIAgent:
             if self.tool_delay > 0 and i < len(assistant_message.tool_calls):
                 time.sleep(self.tool_delay)
 
-        # ── Per-turn aggregate budget enforcement ─────────────────────────
+        # ── 每轮预算约束 ────────────────
         num_tools_seq = len(assistant_message.tool_calls)
         if num_tools_seq > 0:
             enforce_turn_budget(messages[-num_tools_seq:], env=get_active_env(effective_task_id))
@@ -7275,23 +7202,23 @@ class AIAgent:
 
 
     def _emit_context_pressure(self, compaction_progress: float, compressor) -> None:
-        """Notify the user that context is approaching the compaction threshold.
+        """
+        通知用户上下文已接近压缩阈值。
 
-        Args:
-            compaction_progress: How close to compaction (0.0–1.0, where 1.0 = fires).
-            compressor: The ContextCompressor instance (for threshold/context info).
+        参数:
+            compaction_progress: 距离压缩还有多近（0.0–1.0，1.0时触发）。
+            compressor: ContextCompressor 实例（用于获取阈值/上下文信息）。
 
-        Purely user-facing — does NOT modify the message stream.
-        For CLI: prints a formatted line with a progress bar.
-        For gateway: fires status_callback so the platform can send a chat message.
+        纯用户提示 —— 不修改消息流。
+        CLI 模式：打印带有进度条的提示行。
+        网关模式：触发 status_callback，以便平台发送聊天消息。
         """
         from agent.display import format_context_pressure, format_context_pressure_gateway
 
         threshold_pct = compressor.threshold_tokens / compressor.context_length if compressor.context_length else 0.5
 
-        # CLI output — always shown (these are user-facing status notifications,
-        # not verbose debug output, so they bypass quiet_mode).
-        # Gateway users also get the callback below.
+        # CLI 输出 —— 总是展示（作为面对用户的状态通知，不是详细调试输出，不受 quiet_mode 限制）。
+        # Gateway 用户也能收到下面的回调。
         if self.platform in (None, "cli"):
             line = format_context_pressure(
                 compaction_progress=compaction_progress,
@@ -7301,7 +7228,7 @@ class AIAgent:
             )
             self._safe_print(line)
 
-        # Gateway / external consumers
+        # Gateway 或外部调用方
         if self.status_callback:
             try:
                 msg = format_context_pressure_gateway(
@@ -7314,19 +7241,19 @@ class AIAgent:
                 logger.debug("status_callback error in context pressure", exc_info=True)
 
     def _handle_max_iterations(self, messages: list, api_call_count: int) -> str:
-        """Request a summary when max iterations are reached. Returns the final response text."""
-        print(f"⚠️  Reached maximum iterations ({self.max_iterations}). Requesting summary...")
+        """
+        达到最大迭代次数时请求总结。返回最终总结文本。
+        """
+        print(f"⚠️  已达到最大迭代次数 ({self.max_iterations})，请求总结...")
 
         summary_request = (
-            "You've reached the maximum number of tool-calling iterations allowed. "
-            "Please provide a final response summarizing what you've found and accomplished so far, "
-            "without calling any more tools."
+            "你已达到允许的最大工具调用轮数。请给出当前进展和成果的最终总结，不要再调用其他工具。"
         )
         messages.append({"role": "user", "content": summary_request})
 
         try:
-            # Build API messages, stripping internal-only fields
-            # (finish_reason, reasoning) that strict APIs like Mistral reject with 422
+            # 构建 API 消息，移除仅内部使用的字段
+            # （如 finish_reason、reasoning），严格 API（如 Mistral）否则会返回 422
             _needs_sanitize = self._should_sanitize_tool_calls()
             api_messages = []
             for msg in messages:
@@ -7374,7 +7301,7 @@ class AIAgent:
                 if self.max_tokens is not None:
                     summary_kwargs.update(self._max_tokens_param(self.max_tokens))
 
-                # Include provider routing preferences
+                # 加入 provider 路由偏好
                 provider_preferences = {}
                 if self.providers_allowed:
                     provider_preferences["only"] = self.providers_allowed
@@ -7401,7 +7328,6 @@ class AIAgent:
                     final_response = (_msg.content or "").strip()
                 else:
                     summary_response = self._ensure_primary_openai_client(reason="iteration_limit_summary").chat.completions.create(**summary_kwargs)
-
                     if summary_response.choices and summary_response.choices[0].message.content:
                         final_response = summary_response.choices[0].message.content
                     else:
@@ -7413,9 +7339,9 @@ class AIAgent:
                 if final_response:
                     messages.append({"role": "assistant", "content": final_response})
                 else:
-                    final_response = "I reached the iteration limit and couldn't generate a summary."
+                    final_response = "我已达到轮数限制，但没能生成总结。"
             else:
-                # Retry summary generation
+                # 重试生成总结
                 if self.api_mode == "codex_responses":
                     codex_kwargs = self._build_api_kwargs(api_messages)
                     codex_kwargs.pop("tools", None)
@@ -7454,13 +7380,13 @@ class AIAgent:
                     if final_response:
                         messages.append({"role": "assistant", "content": final_response})
                     else:
-                        final_response = "I reached the iteration limit and couldn't generate a summary."
+                        final_response = "我已达到轮数限制，但没能生成总结。"
                 else:
-                    final_response = "I reached the iteration limit and couldn't generate a summary."
+                    final_response = "我已达到轮数限制，但没能生成总结。"
 
         except Exception as e:
-            logging.warning(f"Failed to get summary response: {e}")
-            final_response = f"I reached the maximum iterations ({self.max_iterations}) but couldn't summarize. Error: {str(e)}"
+            logging.warning(f"生成总结回复失败: {e}")
+            final_response = f"已达到最大轮数 ({self.max_iterations}) ，但总结失败。错误详情: {str(e)}"
 
         return final_response
 
@@ -8743,19 +8669,18 @@ class AIAgent:
                                 break
                         # 如果压缩用尽或无效，则进入常规错误处理
 
-                    # Eager fallback for rate-limit errors (429 or quota exhaustion).
-                    # When a fallback model is configured, switch immediately instead
-                    # of burning through retries with exponential backoff -- the
-                    # primary provider won't recover within the retry window.
+                    # 对限流错误（429 或配额耗尽）执行快速回退。
+                    # 当配置了备用模型时，立即切换，而不是
+                    # 通过指数退避耗尽重试次数——主提供商
+                    # 在重试窗口内无法恢复。
                     is_rate_limited = classified.reason in (
                         FailoverReason.rate_limit,
                         FailoverReason.billing,
                     )
                     if is_rate_limited and self._fallback_index < len(self._fallback_chain):
-                        # Don't eagerly fallback if credential pool rotation may
-                        # still recover.  The pool's retry-then-rotate cycle needs
-                        # at least one more attempt to fire — jumping to a fallback
-                        # provider here short-circuits it.
+                        # 如果凭据池轮换可能还能恢复，就不要快速回退。
+                        # 池的重试-然后-轮换循环至少还需要一次尝试才能触发
+                        # ——在这里跳转到备用提供商会绕过它。
                         pool = self._credential_pool
                         pool_may_recover = pool is not None and pool.has_available()
                         if not pool_may_recover:
@@ -8791,9 +8716,9 @@ class AIAgent:
                             messages, system_message, approx_tokens=approx_tokens,
                             task_id=effective_task_id,
                         )
-                        # Compression created a new session — clear history
-                        # so _flush_messages_to_session_db writes compressed
-                        # messages to the new session, not skipping them.
+                        # 压缩创建了新会话——清除历史记录，
+                        # 以便 _flush_messages_to_session_db 将压缩后的
+                        # 消息写入新会话，而不是跳过它们。
                         conversation_history = None
 
                         if len(messages) < original_len:
@@ -8903,9 +8828,9 @@ class AIAgent:
                             messages, system_message, approx_tokens=approx_tokens,
                             task_id=effective_task_id,
                         )
-                        # Compression created a new session — clear history
-                        # so _flush_messages_to_session_db writes compressed
-                        # messages to the new session, not skipping them.
+                        # 压缩创建了新会话——清除历史记录，
+                        # 以便 _flush_messages_to_session_db 将压缩后的
+                        # 消息写入新会话，而不是跳过它们。
                         conversation_history = None
 
                         if len(messages) < original_len or new_ctx and new_ctx < old_ctx:
@@ -9212,20 +9137,20 @@ class AIAgent:
                         except Exception:
                             pass
                 
-                # Check for incomplete <REASONING_SCRATCHPAD> (opened but never closed)
-                # This means the model ran out of output tokens mid-reasoning — retry up to 2 times
+                # 检查是否有未闭合的 <REASONING_SCRATCHPAD>
+                # 这意味着模型在推理中途输出 token 用尽——最多重试2次
                 if has_incomplete_scratchpad(assistant_message.content or ""):
                     self._incomplete_scratchpad_retries += 1
                     
-                    self._vprint(f"{self.log_prefix}⚠️  Incomplete <REASONING_SCRATCHPAD> detected (opened but never closed)")
+                    self._vprint(f"{self.log_prefix}⚠️  检测到未闭合的<REASONING_SCRATCHPAD>标签（已打开但未关闭）")
                     
                     if self._incomplete_scratchpad_retries <= 2:
-                        self._vprint(f"{self.log_prefix}🔄 Retrying API call ({self._incomplete_scratchpad_retries}/2)...")
-                        # Don't add the broken message, just retry
+                        self._vprint(f"{self.log_prefix}🔄 正在重试API调用（第{self._incomplete_scratchpad_retries}/2次）...")
+                        # 不添加损坏的消息，仅重试
                         continue
                     else:
-                        # Max retries - discard this turn and save as partial
-                        self._vprint(f"{self.log_prefix}❌ Max retries (2) for incomplete scratchpad. Saving as partial.", force=True)
+                        # 达到最大重试次数——此轮作答废弃并作为部分结果保存
+                        self._vprint(f"{self.log_prefix}❌ 未闭合推理区域重试2次后仍失败，保存为部分结果。", force=True)
                         self._incomplete_scratchpad_retries = 0
                         
                         rolled_back_messages = self._get_messages_up_to_last_assistant(messages)
@@ -9238,11 +9163,12 @@ class AIAgent:
                             "api_calls": api_call_count,
                             "completed": False,
                             "partial": True,
-                            "error": "Incomplete REASONING_SCRATCHPAD after 2 retries"
+                            "error": "2次重试后仍未闭合REASONING_SCRATCHPAD"
                         }
                 
-                # Reset incomplete scratchpad counter on clean response
+                # 如果响应正常则重置未闭合标记计数器
                 self._incomplete_scratchpad_retries = 0
+ 
 
                 if self.api_mode == "codex_responses" and finish_reason == "incomplete":
                     self._codex_incomplete_retries += 1
@@ -9254,11 +9180,9 @@ class AIAgent:
 
                     if interim_has_content or interim_has_reasoning or interim_has_codex_reasoning:
                         last_msg = messages[-1] if messages else None
-                        # Duplicate detection: two consecutive incomplete assistant
-                        # messages with identical content AND reasoning are collapsed.
-                        # For reasoning-only messages (codex_reasoning_items differ but
-                        # visible content/reasoning are both empty), we also compare
-                        # the encrypted items to avoid silently dropping new state.
+                        # 检查重复：两个连续未完成的助手消息如果 content 和 reasoning 都一样则合并。
+                        # reasoning-only 消息时（仅 codex_reasoning_items 不同但可见内容为空），
+                        # 也需要比较 codex_reasoning_items，避免丢失新状态。
                         last_codex_items = last_msg.get("codex_reasoning_items") if isinstance(last_msg, dict) else None
                         interim_codex_items = interim_msg.get("codex_reasoning_items")
                         duplicate_interim = (
@@ -9275,7 +9199,7 @@ class AIAgent:
 
                     if self._codex_incomplete_retries < 3:
                         if not self.quiet_mode:
-                            self._vprint(f"{self.log_prefix}↻ Codex response incomplete; continuing turn ({self._codex_incomplete_retries}/3)")
+                            self._vprint(f"{self.log_prefix}↻ Codex响应未完成，继续本轮（{self._codex_incomplete_retries}/3）")
                         self._session_messages = messages
                         self._save_session_log(messages)
                         continue
@@ -9288,44 +9212,44 @@ class AIAgent:
                         "api_calls": api_call_count,
                         "completed": False,
                         "partial": True,
-                        "error": "Codex response remained incomplete after 3 continuation attempts",
+                        "error": "Codex响应经过3次尝试后仍未完成",
                     }
                 elif hasattr(self, "_codex_incomplete_retries"):
                     self._codex_incomplete_retries = 0
-                
-                # Check for tool calls
+
+                # 检查是否有工具调用
                 if assistant_message.tool_calls:
                     if not self.quiet_mode:
-                        self._vprint(f"{self.log_prefix}🔧 Processing {len(assistant_message.tool_calls)} tool call(s)...")
-                    
+                        self._vprint(f"{self.log_prefix}🔧 正在处理 {len(assistant_message.tool_calls)} 个工具调用...")
+
                     if self.verbose_logging:
                         for tc in assistant_message.tool_calls:
-                            logging.debug(f"Tool call: {tc.function.name} with args: {tc.function.arguments[:200]}...")
-                    
-                    # Validate tool call names - detect model hallucinations
-                    # Repair mismatched tool names before validating
+                            logging.debug(f"工具调用: {tc.function.name}，参数: {tc.function.arguments[:200]}...")
+
+                    # 校验工具调用名称——检测模型幻觉
+                    # 校正名称后再校验
                     for tc in assistant_message.tool_calls:
                         if tc.function.name not in self.valid_tool_names:
                             repaired = self._repair_tool_call(tc.function.name)
                             if repaired:
-                                print(f"{self.log_prefix}🔧 Auto-repaired tool name: '{tc.function.name}' -> '{repaired}'")
+                                print(f"{self.log_prefix}🔧 自动修正工具名: '{tc.function.name}' -> '{repaired}'")
                                 tc.function.name = repaired
                     invalid_tool_calls = [
                         tc.function.name for tc in assistant_message.tool_calls
                         if tc.function.name not in self.valid_tool_names
                     ]
                     if invalid_tool_calls:
-                        # Track retries for invalid tool calls
+                        # 记录无效工具调用的重试次数
                         self._invalid_tool_retries += 1
 
-                        # Return helpful error to model — model can self-correct next turn
+                        # 返回提示错误给模型——模型可在下一轮自我修正
                         available = ", ".join(sorted(self.valid_tool_names))
                         invalid_name = invalid_tool_calls[0]
                         invalid_preview = invalid_name[:80] + "..." if len(invalid_name) > 80 else invalid_name
-                        self._vprint(f"{self.log_prefix}⚠️  Unknown tool '{invalid_preview}' — sending error to model for self-correction ({self._invalid_tool_retries}/3)")
+                        self._vprint(f"{self.log_prefix}⚠️  未知工具 '{invalid_preview}'——正在发送错误信息给模型自我修正（{self._invalid_tool_retries}/3）")
 
                         if self._invalid_tool_retries >= 3:
-                            self._vprint(f"{self.log_prefix}❌ Max retries (3) for invalid tool calls exceeded. Stopping as partial.", force=True)
+                            self._vprint(f"{self.log_prefix}❌ 无效工具调用已达到3次重试上限，作为部分结果结束。", force=True)
                             self._invalid_tool_retries = 0
                             self._persist_session(messages, conversation_history)
                             return {
@@ -9334,27 +9258,27 @@ class AIAgent:
                                 "api_calls": api_call_count,
                                 "completed": False,
                                 "partial": True,
-                                "error": f"Model generated invalid tool call: {invalid_preview}"
+                                "error": f"模型生成了无效的工具调用: {invalid_preview}"
                             }
 
                         assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
                         messages.append(assistant_msg)
                         for tc in assistant_message.tool_calls:
                             if tc.function.name not in self.valid_tool_names:
-                                content = f"Tool '{tc.function.name}' does not exist. Available tools: {available}"
+                                content = f"工具 '{tc.function.name}' 不存在。可用工具有: {available}"
                             else:
-                                content = "Skipped: another tool call in this turn used an invalid name. Please retry this tool call."
+                                content = "跳过：本轮另一工具调用名无效，请重试此工具调用。"
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc.id,
                                 "content": content,
                             })
                         continue
-                    # Reset retry counter on successful tool call validation
+                    # 工具调用名校验通过则重置重试计数
                     self._invalid_tool_retries = 0
-                    
-                    # Validate tool call arguments are valid JSON
-                    # Handle empty strings as empty objects (common model quirk)
+
+                    # 校验工具调用参数为合法JSON
+                    # 处理空字符串为{}（模型常见问题）
                     invalid_json_args = []
                     for tc in assistant_message.tool_calls:
                         args = tc.function.arguments
@@ -9364,7 +9288,7 @@ class AIAgent:
                         if args is not None and not isinstance(args, str):
                             tc.function.arguments = str(args)
                             args = tc.function.arguments
-                        # Treat empty/whitespace strings as empty object
+                        # 空字符串或仅空白视为{}
                         if not args or not args.strip():
                             tc.function.arguments = "{}"
                             continue
@@ -9372,14 +9296,11 @@ class AIAgent:
                             json.loads(args)
                         except json.JSONDecodeError as e:
                             invalid_json_args.append((tc.function.name, str(e)))
-                    
+
                     if invalid_json_args:
-                        # Check if the invalid JSON is due to truncation rather
-                        # than a model formatting mistake.  Routers sometimes
-                        # rewrite finish_reason from "length" to "tool_calls",
-                        # hiding the truncation from the length handler above.
-                        # Detect truncation: args that don't end with } or ]
-                        # (after stripping whitespace) are cut off mid-stream.
+                        # 检查无效JSON是否因截断导致，非模型格式错误
+                        # 路由器有时把 finish_reason 从 "length" 改为 "tool_calls"，掩盖了上面的长度终结处理
+                        # 截断检测：参数非'}'或']'结尾（去掉空白后）表示中断
                         _truncated = any(
                             not (tc.function.arguments or "").rstrip().endswith(("}", "]"))
                             for tc in assistant_message.tool_calls
@@ -9387,8 +9308,8 @@ class AIAgent:
                         )
                         if _truncated:
                             self._vprint(
-                                f"{self.log_prefix}⚠️  Truncated tool call arguments detected "
-                                f"(finish_reason={finish_reason!r}) — refusing to execute.",
+                                f"{self.log_prefix}⚠️  检测到工具调用参数被截断"
+                                f"(finish_reason={finish_reason!r}) — 拒绝执行。",
                                 force=True,
                             )
                             self._invalid_json_retries = 0
@@ -9400,52 +9321,52 @@ class AIAgent:
                                 "api_calls": api_call_count,
                                 "completed": False,
                                 "partial": True,
-                                "error": "Response truncated due to output length limit",
+                                "error": "响应因输出长度限制被截断",
                             }
 
-                        # Track retries for invalid JSON arguments
+                        # 记录无效JSON参数的重试
                         self._invalid_json_retries += 1
 
                         tool_name, error_msg = invalid_json_args[0]
-                        self._vprint(f"{self.log_prefix}⚠️  Invalid JSON in tool call arguments for '{tool_name}': {error_msg}")
+                        self._vprint(f"{self.log_prefix}⚠️  工具 '{tool_name}' 的参数JSON无效: {error_msg}")
 
                         if self._invalid_json_retries < 3:
-                            self._vprint(f"{self.log_prefix}🔄 Retrying API call ({self._invalid_json_retries}/3)...")
-                            # Don't add anything to messages, just retry the API call
+                            self._vprint(f"{self.log_prefix}🔄 重试API调用（{self._invalid_json_retries}/3）...")
+                            # 不加入messages，直接重试
                             continue
                         else:
-                            # Instead of returning partial, inject tool error results so the model can recover.
-                            # Using tool results (not user messages) preserves role alternation.
-                            self._vprint(f"{self.log_prefix}⚠️  Injecting recovery tool results for invalid JSON...")
-                            self._invalid_json_retries = 0  # Reset for next attempt
-                            
-                            # Append the assistant message with its (broken) tool_calls
+                            # 不直接返回部分结束，而是注入工具错误消息，使模型有机会恢复继续
+                            # 使用tool结果（而非user消息），保持角色顺序交替
+                            self._vprint(f"{self.log_prefix}⚠️  注入工具错误结果以恢复无效JSON...",)
+                            self._invalid_json_retries = 0  # 下次重置
+
+                            # 追加带坏掉工具调用的助手消息
                             recovery_assistant = self._build_assistant_message(assistant_message, finish_reason)
                             messages.append(recovery_assistant)
-                            
-                            # Respond with tool error results for each tool call
+
+                            # 为每个工具调用回复错误
                             invalid_names = {name for name, _ in invalid_json_args}
                             for tc in assistant_message.tool_calls:
                                 if tc.function.name in invalid_names:
                                     err = next(e for n, e in invalid_json_args if n == tc.function.name)
                                     tool_result = (
-                                        f"Error: Invalid JSON arguments. {err}. "
-                                        f"For tools with no required parameters, use an empty object: {{}}. "
-                                        f"Please retry with valid JSON."
+                                        f"错误：参数不是有效的JSON。{err}。"
+                                        f"如工具无必填参数请用空对象: {{}}。"
+                                        f"请重试并确保JSON有效。"
                                     )
                                 else:
-                                    tool_result = "Skipped: other tool call in this response had invalid JSON."
+                                    tool_result = "跳过：本次回复中有其他工具调用参数无效。"
                                 messages.append({
                                     "role": "tool",
                                     "tool_call_id": tc.id,
                                     "content": tool_result,
                                 })
                             continue
-                    
-                    # Reset retry counter on successful JSON validation
+
+                    # 校验通过重置JSON重试计数
                     self._invalid_json_retries = 0
 
-                    # ── Post-call guardrails ──────────────────────────
+                    # ── 工具调用后置校验 ──────────────────────────
                     assistant_message.tool_calls = self._cap_delegate_task_calls(
                         assistant_message.tool_calls
                     )
@@ -9455,18 +9376,15 @@ class AIAgent:
 
                     assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
                     
-                    # If this turn has both content AND tool_calls, capture the content
-                    # as a fallback final response. Common pattern: model delivers its
-                    # answer and calls memory/skill tools as a side-effect in the same
-                    # turn. If the follow-up turn after tools is empty, we use this.
+                    # 如果本轮既有content又有tool_calls，则将content保存作为备选最终回复。
+                    # 常见模式：模型在同一轮同时给出回答并作为副作用调用memory/skill等工具。
+                    # 如果工具调用后的跟进轮内容为空，则使用这里保存的content作为输出。
                     turn_content = assistant_message.content or ""
                     if turn_content and self._has_content_after_think_block(turn_content):
                         self._last_content_with_tools = turn_content
-                        # Only mute subsequent output when EVERY tool call in
-                        # this turn is post-response housekeeping (memory, todo,
-                        # skill_manage, etc.).  If any substantive tool is present
-                        # (search_files, read_file, write_file, terminal, ...),
-                        # keep output visible so the user sees progress.
+                        # 只有当本轮所有工具调用都是响应后内部维护类（memory、todo、skill_manage等）时，才静音后续输出。
+                        # 如果存在重要工具（如search_files、read_file、write_file、terminal等），
+                        # 仍保持输出以便用户看到进展。
                         _HOUSEKEEPING_TOOLS = frozenset({
                             "memory", "todo", "skill_manage", "session_search",
                         })
@@ -9480,9 +9398,8 @@ class AIAgent:
                             clean = self._strip_think_blocks(turn_content).strip()
                             if clean:
                                 self._vprint(f"  ┊ 💬 {clean}")
-                    
-                    # Pop thinking-only prefill message(s) before appending
-                    # (tool-call path — same rationale as the final-response path).
+
+                    # 在添加助手消息前，先把仅包含思考内容的预填消息弹出（仅工具调用流程，与最终回复流程相同理由）。
                     _had_prefill = False
                     while (
                         messages
@@ -9492,13 +9409,10 @@ class AIAgent:
                         messages.pop()
                         _had_prefill = True
 
-                    # Reset prefill counter when tool calls follow a prefill
-                    # recovery.  Without this, the counter accumulates across
-                    # the whole conversation — a model that intermittently
-                    # empties (empty → prefill → tools → empty → prefill →
-                    # tools) burns both prefill attempts and the third empty
-                    # gets zero recovery.  Resetting here treats each tool-
-                    # call success as a fresh start.
+                    # 工具调用跟随预填恢复时重置预填尝试计数。
+                    # 否则该计数会在整个对话中累计，导致模型间歇性空回复（空→预填→工具→空→预填→工具）时，
+                    # 很快耗尽重试机会，第三次空回复无法恢复。
+                    # 在此重置，确保每次工具调用成功后都重新开始计数。
                     if _had_prefill:
                         self._thinking_prefill_retries = 0
                         self._empty_content_retries = 0
@@ -9506,12 +9420,9 @@ class AIAgent:
                     messages.append(assistant_msg)
                     self._emit_interim_assistant_message(assistant_msg)
 
-                    # Close any open streaming display (response box, reasoning
-                    # box) before tool execution begins.  Intermediate turns may
-                    # have streamed early content that opened the response box;
-                    # flushing here prevents it from wrapping tool feed lines.
-                    # Only signal the display callback — TTS (_stream_callback)
-                    # should NOT receive None (it uses None as end-of-stream).
+                    # 在执行工具调用前关闭任何已开启的流式显示窗口（响应框、推理框）。
+                    # 中间轮次可能已流式输出提前打开响应框，提前关闭可以避免工具输出被其包裹。
+                    # 只通知显示回调——TTS（_stream_callback）不应收到None（其内部以None作为流结束信号）。
                     if self.stream_delta_callback:
                         try:
                             self.stream_delta_callback(None)
@@ -9520,40 +9431,28 @@ class AIAgent:
 
                     self._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
 
-                    # Reset per-turn retry counters after successful tool
-                    # execution so a single truncation doesn't poison the
-                    # entire conversation.
+                    # 工具调用成功后重置本轮重试计数，防止单次截断影响整个会话。
                     truncated_tool_call_retries = 0
 
-                    # Signal that a paragraph break is needed before the next
-                    # streamed text.  We don't emit it immediately because
-                    # multiple consecutive tool iterations would stack up
-                    # redundant blank lines.  Instead, _fire_stream_delta()
-                    # will prepend a single "\n\n" the next time real text
-                    # arrives.
+                    # 标记下次流式文本前需要段落换行。
+                    # 此处不立即输出，因为连续多轮工具调用会堆积多余空行，
+                    # 而_fire_stream_delta()会在下次真实文本来临时自动添加一个“\n\n”。
                     self._stream_needs_break = True
 
-                    # Refund the iteration if the ONLY tool(s) called were
-                    # execute_code (programmatic tool calling).  These are
-                    # cheap RPC-style calls that shouldn't eat the budget.
+                    # 如果本轮仅调用了execute_code（程序化调用），则返还本轮计数（此类为廉价RPC风格调用，不应消耗预算）。
                     _tc_names = {tc.function.name for tc in assistant_message.tool_calls}
                     if _tc_names == {"execute_code"}:
                         self.iteration_budget.refund()
-                    
-                    # Use real token counts from the API response to decide
-                    # compression.  prompt_tokens + completion_tokens is the
-                    # actual context size the provider reported plus the
-                    # assistant turn — a tight lower bound for the next prompt.
-                    # Tool results appended above aren't counted yet, but the
-                    # threshold (default 50%) leaves ample headroom; if tool
-                    # results push past it, the next API call will report the
-                    # real total and trigger compression then.
+
+                    # 使用API响应中的实际token计数决定是否需要压缩。
+                    # prompt_tokens + completion_tokens为服务端实际报告的上下文大小（加上本轮助手回复），
+                    # 是下次提示词的紧下界。
+                    # 工具调用结果还未计入，但压缩阈值（默认50%）有充足余量，
+                    # 如果工具结果让token超出，下轮API调用会获取真实总数再触发压缩。
                     #
-                    # If last_prompt_tokens is 0 (stale after API disconnect
-                    # or provider returned no usage data), fall back to rough
-                    # estimate to avoid missing compression.  Without this,
-                    # a session can grow unbounded after disconnects because
-                    # should_compress(0) never fires.  (#2153)
+                    # 如果last_prompt_tokens为0（如API断开或未返回用量数据），
+                    # 则采用粗略估算以避免错过压缩时机。
+                    # 否则会话超出窗口后无法压缩，导致无限膨胀（should_compress(0)不会触发）。 (#2153)
                     _compressor = self.context_compressor
                     if _compressor.last_prompt_tokens > 0:
                         _real_tokens = (
@@ -10195,47 +10094,48 @@ def main(
             if not info["available"]:
                 print(f"    Requirements: {', '.join(info['requirements'])}")
         
-        # Show individual tools
+        # 显示单独的工具
+ 
         all_tools = get_all_tool_names()
         print(f"\n🔧 Individual Tools ({len(all_tools)} available):")
         for tool_name in sorted(all_tools):
             toolset = get_toolset_for_tool(tool_name)
             print(f"  📌 {tool_name} (from {toolset})")
-        
-        print("\n💡 Usage Examples:")
-        print("  # Use predefined toolsets")
-        print("  python run_agent.py --enabled_toolsets=research --query='search for Python news'")
-        print("  python run_agent.py --enabled_toolsets=development --query='debug this code'")
-        print("  python run_agent.py --enabled_toolsets=safe --query='analyze without terminal'")
+
+        print("\n💡 使用示例:")
+        print("  # 使用预定义工具集")
+        print("  python run_agent.py --enabled_toolsets=research --query='搜索 Python 新闻'")
+        print("  python run_agent.py --enabled_toolsets=development --query='调试此代码'")
+        print("  python run_agent.py --enabled_toolsets=safe --query='无需终端地分析'")
         print("  ")
-        print("  # Combine multiple toolsets")
-        print("  python run_agent.py --enabled_toolsets=web,vision --query='analyze website'")
+        print("  # 组合多个工具集")
+        print("  python run_agent.py --enabled_toolsets=web,vision --query='分析网站'")
         print("  ")
-        print("  # Disable toolsets")
-        print("  python run_agent.py --disabled_toolsets=terminal --query='no command execution'")
+        print("  # 禁用工具集")
+        print("  python run_agent.py --disabled_toolsets=terminal --query='禁止命令执行'")
         print("  ")
-        print("  # Run with trajectory saving enabled")
-        print("  python run_agent.py --save_trajectories --query='your question here'")
+        print("  # 运行并启用轨迹保存")
+        print("  python run_agent.py --save_trajectories --query='在此输入你的问题'")
         return
-    
-    # Parse toolset selection arguments
+
+    # 解析工具集选择参数
     enabled_toolsets_list = None
     disabled_toolsets_list = None
-    
+
     if enabled_toolsets:
         enabled_toolsets_list = [t.strip() for t in enabled_toolsets.split(",")]
-        print(f"🎯 Enabled toolsets: {enabled_toolsets_list}")
-    
+        print(f"🎯 已启用工具集: {enabled_toolsets_list}")
+
     if disabled_toolsets:
         disabled_toolsets_list = [t.strip() for t in disabled_toolsets.split(",")]
-        print(f"🚫 Disabled toolsets: {disabled_toolsets_list}")
-    
+        print(f"🚫 已禁用工具集: {disabled_toolsets_list}")
+
     if save_trajectories:
-        print("💾 Trajectory saving: ENABLED")
-        print("   - Successful conversations → trajectory_samples.jsonl")
-        print("   - Failed conversations → failed_trajectories.jsonl")
-    
-    # Initialize agent with provided parameters
+        print("💾 轨迹保存: 已启用")
+        print("   - 成功的对话 → trajectory_samples.jsonl")
+        print("   - 失败的对话 → failed_trajectories.jsonl")
+
+    # 用指定参数初始化代理
     try:
         agent = AIAgent(
             base_url=base_url,
@@ -10249,48 +10149,48 @@ def main(
             log_prefix_chars=log_prefix_chars
         )
     except RuntimeError as e:
-        print(f"❌ Failed to initialize agent: {e}")
+        print(f"❌ 代理初始化失败: {e}")
         return
-    
-    # Use provided query or default to Python 3.13 example
+
+    # 用提供的查询或默认 Python 3.13 示例
     if query is None:
         user_query = (
-            "Tell me about the latest developments in Python 3.13 and what new features "
-            "developers should know about. Please search for current information and try it out."
+            "请告诉我 Python 3.13 的最新进展以及开发者需要了解的新特性。"
+            "请搜索最新信息并进行尝试。"
         )
     else:
         user_query = query
-    
-    print(f"\n📝 User Query: {user_query}")
+
+    print(f"\n📝 用户提问: {user_query}")
     print("\n" + "=" * 50)
-    
-    # Run conversation
+
+    # 运行对话
     result = agent.run_conversation(user_query)
-    
+
     print("\n" + "=" * 50)
-    print("📋 CONVERSATION SUMMARY")
+    print("📋 对话概要")
     print("=" * 50)
-    print(f"✅ Completed: {result['completed']}")
-    print(f"📞 API Calls: {result['api_calls']}")
-    print(f"💬 Messages: {len(result['messages'])}")
-    
+    print(f"✅ 已完成: {result['completed']}")
+    print(f"📞 API 调用次数: {result['api_calls']}")
+    print(f"💬 消息数: {len(result['messages'])}")
+
     if result['final_response']:
-        print("\n🎯 FINAL RESPONSE:")
+        print("\n🎯 最终回复:")
         print("-" * 30)
         print(result['final_response'])
-    
-    # Save sample trajectory to UUID-named file if requested
+
+    # 如需要，保存样本轨迹到唯一 UUID 文件名
     if save_sample:
         sample_id = str(uuid.uuid4())[:8]
         sample_filename = f"sample_{sample_id}.json"
-        
-        # Convert messages to trajectory format (same as batch_runner)
+
+        # 将消息转换为轨迹格式（同 batch_runner）
         trajectory = agent._convert_to_trajectory_format(
             result['messages'], 
             user_query, 
             result['completed']
         )
-        
+
         entry = {
             "conversations": trajectory,
             "timestamp": datetime.now().isoformat(),
@@ -10298,16 +10198,16 @@ def main(
             "completed": result['completed'],
             "query": user_query
         }
-        
+
         try:
             with open(sample_filename, "w", encoding="utf-8") as f:
-                # Pretty-print JSON with indent for readability
+                # 优雅打印 JSON，便于阅读
                 f.write(json.dumps(entry, ensure_ascii=False, indent=2))
-            print(f"\n💾 Sample trajectory saved to: {sample_filename}")
+            print(f"\n💾 样本轨迹已保存至: {sample_filename}")
         except Exception as e:
-            print(f"\n⚠️ Failed to save sample: {e}")
-    
-    print("\n👋 Agent execution completed!")
+            print(f"\n⚠️ 保存样本失败: {e}")
+
+    print("\n👋 代理运行结束!")
 
 
 if __name__ == "__main__":
